@@ -1,0 +1,295 @@
+package vm
+
+import (
+	"compress/gzip"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// SnapshotEntry represents a single VM snapshot.
+type SnapshotEntry struct {
+	Name        string    `json:"name"`
+	VMName      string    `json:"vm_name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	DiskSize    int64     `json:"disk_size"` // Original uncompressed size in bytes
+}
+
+// SnapshotData holds all snapshots for a VM.
+type SnapshotData struct {
+	Snapshots []SnapshotEntry `json:"snapshots"`
+}
+
+// SnapshotManager handles VM disk snapshots.
+type SnapshotManager struct {
+	baseDir string // ~/.vmterminal
+}
+
+// NewSnapshotManager creates a new snapshot manager.
+func NewSnapshotManager(baseDir string) *SnapshotManager {
+	return &SnapshotManager{baseDir: baseDir}
+}
+
+// snapshotsDir returns the snapshots directory for a VM.
+func (m *SnapshotManager) snapshotsDir(vmName string) string {
+	return filepath.Join(m.baseDir, "data", vmName, "snapshots")
+}
+
+// snapshotsFile returns the snapshots metadata file path for a VM.
+func (m *SnapshotManager) snapshotsFile(vmName string) string {
+	return filepath.Join(m.baseDir, "data", vmName, "snapshots.json")
+}
+
+// diskPath returns the disk image path for a VM.
+func (m *SnapshotManager) diskPath(vmName string) string {
+	return filepath.Join(m.baseDir, "data", vmName, "disk.raw")
+}
+
+// snapshotPath returns the path to a specific snapshot file.
+func (m *SnapshotManager) snapshotPath(vmName, snapshotName string) string {
+	return filepath.Join(m.snapshotsDir(vmName), snapshotName+".raw.gz")
+}
+
+// Load reads the snapshot metadata from disk.
+func (m *SnapshotManager) Load(vmName string) (*SnapshotData, error) {
+	data, err := os.ReadFile(m.snapshotsFile(vmName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &SnapshotData{Snapshots: []SnapshotEntry{}}, nil
+		}
+		return nil, fmt.Errorf("read snapshots: %w", err)
+	}
+
+	var snapshots SnapshotData
+	if err := json.Unmarshal(data, &snapshots); err != nil {
+		return nil, fmt.Errorf("parse snapshots: %w", err)
+	}
+
+	return &snapshots, nil
+}
+
+// Save writes the snapshot metadata to disk.
+func (m *SnapshotManager) Save(vmName string, data *SnapshotData) error {
+	// Ensure data directory exists
+	dataDir := filepath.Join(m.baseDir, "data", vmName)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal snapshots: %w", err)
+	}
+
+	if err := os.WriteFile(m.snapshotsFile(vmName), jsonData, 0644); err != nil {
+		return fmt.Errorf("write snapshots: %w", err)
+	}
+
+	return nil
+}
+
+// CreateSnapshot creates a new snapshot by compressing the VM disk.
+func (m *SnapshotManager) CreateSnapshot(vmName, snapshotName, description string) error {
+	// Check if disk exists
+	diskPath := m.diskPath(vmName)
+	diskInfo, err := os.Stat(diskPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("VM disk not found: %s", diskPath)
+		}
+		return fmt.Errorf("stat disk: %w", err)
+	}
+
+	// Load existing snapshots
+	data, err := m.Load(vmName)
+	if err != nil {
+		return err
+	}
+
+	// Check for duplicate name
+	for _, snap := range data.Snapshots {
+		if snap.Name == snapshotName {
+			return fmt.Errorf("snapshot '%s' already exists", snapshotName)
+		}
+	}
+
+	// Create snapshots directory
+	snapshotsDir := m.snapshotsDir(vmName)
+	if err := os.MkdirAll(snapshotsDir, 0755); err != nil {
+		return fmt.Errorf("create snapshots dir: %w", err)
+	}
+
+	// Open source disk
+	srcFile, err := os.Open(diskPath)
+	if err != nil {
+		return fmt.Errorf("open disk: %w", err)
+	}
+	defer srcFile.Close()
+
+	// Create compressed snapshot file
+	snapPath := m.snapshotPath(vmName, snapshotName)
+	dstFile, err := os.Create(snapPath)
+	if err != nil {
+		return fmt.Errorf("create snapshot file: %w", err)
+	}
+	defer dstFile.Close()
+
+	// Create gzip writer
+	gzWriter := gzip.NewWriter(dstFile)
+	defer gzWriter.Close()
+
+	// Copy disk to gzip
+	if _, err := io.Copy(gzWriter, srcFile); err != nil {
+		os.Remove(snapPath) // Clean up on failure
+		return fmt.Errorf("compress disk: %w", err)
+	}
+
+	// Ensure gzip is flushed
+	if err := gzWriter.Close(); err != nil {
+		os.Remove(snapPath)
+		return fmt.Errorf("finalize compression: %w", err)
+	}
+
+	// Create snapshot entry
+	entry := SnapshotEntry{
+		Name:        snapshotName,
+		VMName:      vmName,
+		Description: description,
+		CreatedAt:   time.Now(),
+		DiskSize:    diskInfo.Size(),
+	}
+
+	data.Snapshots = append(data.Snapshots, entry)
+
+	// Save metadata
+	if err := m.Save(vmName, data); err != nil {
+		os.Remove(snapPath)
+		return err
+	}
+
+	return nil
+}
+
+// ListSnapshots returns all snapshots for a VM.
+func (m *SnapshotManager) ListSnapshots(vmName string) ([]SnapshotEntry, error) {
+	data, err := m.Load(vmName)
+	if err != nil {
+		return nil, err
+	}
+	return data.Snapshots, nil
+}
+
+// GetSnapshot returns a specific snapshot.
+func (m *SnapshotManager) GetSnapshot(vmName, snapshotName string) (*SnapshotEntry, error) {
+	data, err := m.Load(vmName)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, snap := range data.Snapshots {
+		if snap.Name == snapshotName {
+			return &snap, nil
+		}
+	}
+
+	return nil, fmt.Errorf("snapshot '%s' not found", snapshotName)
+}
+
+// RestoreSnapshot restores a VM disk from a snapshot.
+// WARNING: This overwrites the current disk! VM must be stopped.
+func (m *SnapshotManager) RestoreSnapshot(vmName, snapshotName string) error {
+	// Verify snapshot exists
+	_, err := m.GetSnapshot(vmName, snapshotName)
+	if err != nil {
+		return err
+	}
+
+	snapPath := m.snapshotPath(vmName, snapshotName)
+	diskPath := m.diskPath(vmName)
+
+	// Open compressed snapshot
+	srcFile, err := os.Open(snapPath)
+	if err != nil {
+		return fmt.Errorf("open snapshot: %w", err)
+	}
+	defer srcFile.Close()
+
+	// Create gzip reader
+	gzReader, err := gzip.NewReader(srcFile)
+	if err != nil {
+		return fmt.Errorf("open gzip: %w", err)
+	}
+	defer gzReader.Close()
+
+	// Create temporary file for restored disk
+	tmpPath := diskPath + ".restoring"
+	dstFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("create temp disk: %w", err)
+	}
+	defer dstFile.Close()
+
+	// Decompress to disk
+	if _, err := io.Copy(dstFile, gzReader); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("decompress snapshot: %w", err)
+	}
+
+	// Close files before rename
+	dstFile.Close()
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, diskPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("replace disk: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteSnapshot removes a snapshot.
+func (m *SnapshotManager) DeleteSnapshot(vmName, snapshotName string) error {
+	data, err := m.Load(vmName)
+	if err != nil {
+		return err
+	}
+
+	// Find and remove snapshot entry
+	found := false
+	newSnapshots := make([]SnapshotEntry, 0, len(data.Snapshots))
+	for _, snap := range data.Snapshots {
+		if snap.Name == snapshotName {
+			found = true
+		} else {
+			newSnapshots = append(newSnapshots, snap)
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("snapshot '%s' not found", snapshotName)
+	}
+
+	// Delete snapshot file
+	snapPath := m.snapshotPath(vmName, snapshotName)
+	if err := os.Remove(snapPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete snapshot file: %w", err)
+	}
+
+	// Update metadata
+	data.Snapshots = newSnapshots
+	return m.Save(vmName, data)
+}
+
+// SnapshotFileSize returns the compressed size of a snapshot file.
+func (m *SnapshotManager) SnapshotFileSize(vmName, snapshotName string) (int64, error) {
+	snapPath := m.snapshotPath(vmName, snapshotName)
+	info, err := os.Stat(snapPath)
+	if err != nil {
+		return 0, fmt.Errorf("stat snapshot: %w", err)
+	}
+	return info.Size(), nil
+}
