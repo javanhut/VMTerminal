@@ -21,6 +21,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Warm startup timing targets (VMT_TIMING=1):
+// When assets are cached and disk exists (warm path):
+//   - config_load:     <50ms   (load JSON config from disk)
+//   - distro_resolve:  <10ms   (registry lookup)
+//   - manager_create:  <100ms  (driver init, apply defaults)
+//   - vm_prepare:      <200ms  (parallel asset checks, skip downloads)
+//   - vm_start:        <2000ms (hypervisor-dependent, kernel boot)
+//   - console_attach:  <50ms   (terminal raw mode setup)
+//   - TOTAL:           <3000ms
+//
+// Cold path (first run) adds: asset downloads, disk creation, rootfs extraction.
+// Run with VMT_TIMING=1 to see actual breakdown.
+
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Start VM (handles all setup interactively if needed)",
