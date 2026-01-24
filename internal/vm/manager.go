@@ -132,6 +132,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 }
 
 // Prepare downloads assets and creates disk image if needed.
+// Uses optimized warm path when assets and disk already exist.
 func (m *Manager) Prepare(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -140,6 +141,71 @@ func (m *Manager) Prepare(ctx context.Context) error {
 		return fmt.Errorf("cannot prepare: invalid state %s", m.state)
 	}
 
+	// Check for warm path - assets and disk already exist
+	if m.isWarmPath() {
+		return m.warmPrepare(ctx)
+	}
+
+	return m.coldPrepare(ctx)
+}
+
+// isWarmPath returns true if all assets and disk already exist (no downloads needed).
+func (m *Manager) isWarmPath() bool {
+	// Check if assets exist
+	exist, _ := m.assets.AssetsExist()
+	if !exist {
+		return false
+	}
+	// Check if disk exists
+	return m.images.DiskExists(m.cfg.DiskName)
+}
+
+// warmPrepare is the optimized path when assets and disk already exist.
+// Skips EnsureAssets/EnsureDisk overhead and goes directly to VM creation.
+func (m *Manager) warmPrepare(ctx context.Context) error {
+	// Get cached paths directly - we know they exist
+	assetPaths, err := m.assets.GetAssetPaths()
+	if err != nil {
+		// Fallback to cold path if GetAssetPaths fails
+		return m.coldPrepare(ctx)
+	}
+
+	diskPath := m.images.DiskPath(m.cfg.DiskName)
+	bootConfig := m.assets.BootConfig()
+
+	// Configure and create VM
+	vmCfg := &hypervisor.VMConfig{
+		CPUs:          m.cfg.CPUs,
+		MemoryMB:      m.cfg.MemoryMB,
+		Kernel:        assetPaths.Kernel,
+		Initrd:        assetPaths.Initramfs,
+		Cmdline:       bootConfig.Cmdline,
+		DiskPath:      diskPath,
+		SharedDirs:    m.cfg.SharedDirs,
+		EnableNetwork: m.cfg.EnableNetwork,
+		MACAddress:    m.cfg.MACAddress,
+	}
+
+	// Add SSH port forwarding if configured
+	if m.cfg.SSHHostPort > 0 {
+		vmCfg.PortForwards = map[int]int{
+			m.cfg.SSHHostPort: 22,
+		}
+	}
+
+	// Skip Validate on warm path - config hasn't changed since last successful run
+	if err := m.driver.Create(ctx, vmCfg); err != nil {
+		m.state = StateError
+		m.lastErr = err
+		return fmt.Errorf("create VM: %w", err)
+	}
+
+	m.state = StateReady
+	return nil
+}
+
+// coldPrepare is the full path that ensures assets and disk exist.
+func (m *Manager) coldPrepare(ctx context.Context) error {
 	// Download kernel/initramfs if needed
 	assetPaths, err := m.assets.EnsureAssets()
 	if err != nil {
