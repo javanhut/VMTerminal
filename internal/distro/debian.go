@@ -34,11 +34,11 @@ func (p *DebianProvider) AssetURLs(arch Arch) (*AssetURLs, error) {
 
 	debianArch := p.toDebianArch(arch)
 
-	// Debian provides rootfs tarballs in genericcloud images
+	// Debian cloud images: use .qcow2 which contains kernel/initrd in /boot
 	return &AssetURLs{
-		Kernel:  "", // Extracted from rootfs
-		Initrd:  "", // Extracted from rootfs
-		Rootfs:  fmt.Sprintf("%s/%s/latest/debian-%s-genericcloud-%s.tar.xz", debianBaseURL, debianCodename, debianVersion, debianArch),
+		Kernel: "", // Extracted from rootfs
+		Initrd: "", // Extracted from rootfs
+		Rootfs: fmt.Sprintf("%s/%s/latest/debian-%s-genericcloud-%s.qcow2", debianBaseURL, debianCodename, debianVersion, debianArch),
 	}, nil
 }
 
@@ -56,9 +56,9 @@ func (p *DebianProvider) BootConfig(arch Arch) *BootConfig {
 // SetupRequirements returns setup requirements for Debian.
 func (p *DebianProvider) SetupRequirements() *SetupRequirements {
 	return &SetupRequirements{
-		NeedsFormatting: true,
+		NeedsFormatting: false, // qcow2 already formatted
 		FSType:          "ext4",
-		NeedsExtraction: true,
+		NeedsExtraction: false, // rootfs is the disk image itself
 	}
 }
 
@@ -74,9 +74,21 @@ func (p *DebianProvider) toDebianArch(arch Arch) string {
 	}
 }
 
-// NeedsKernelExtraction returns true because Debian kernel is inside rootfs.
-func (p *DebianProvider) NeedsKernelExtraction() bool {
-	return true
+// KernelLocator returns patterns for finding kernel in Debian rootfs.
+func (p *DebianProvider) KernelLocator() *KernelLocator {
+	return &KernelLocator{
+		KernelPatterns: []string{
+			"boot/vmlinuz-*-amd64",
+			"boot/vmlinuz-*-arm64",
+			"boot/vmlinuz-*",
+		},
+		InitrdPatterns: []string{
+			"boot/initrd.img-*-amd64",
+			"boot/initrd.img-*-arm64",
+			"boot/initrd.img-*",
+		},
+		ArchiveType: "qcow2",
+	}
 }
 
 func init() {

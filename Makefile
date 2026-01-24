@@ -5,7 +5,10 @@ VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS=-ldflags "-X github.com/javanstorm/vmterminal/internal/version.Version=$(VERSION) -X github.com/javanstorm/vmterminal/internal/version.BuildTime=$(BUILD_TIME)"
 
-.PHONY: all build clean test vet fmt check install run status help
+# Binary aliases
+ALIASES=vmt vmterm
+
+.PHONY: all build clean test vet fmt check install uninstall run status help aliases
 
 # Default target
 all: build
@@ -22,6 +25,7 @@ release:
 clean:
 	rm -f $(BINARY)
 	rm -f $(BINARY)-*
+	rm -f vmt vmterm
 	go clean
 
 # Run tests
@@ -45,15 +49,30 @@ fmt-fix:
 check: fmt vet build
 	@echo "All checks passed!"
 
-# Install to /usr/local/bin
+# Install to /usr/local/bin with aliases
 install: build
 	sudo cp $(BINARY) /usr/local/bin/$(BINARY)
-	@echo "Installed to /usr/local/bin/$(BINARY)"
+	@echo "Installed $(BINARY) to /usr/local/bin/$(BINARY)"
+	@for alias in $(ALIASES); do \
+		sudo ln -sf /usr/local/bin/$(BINARY) /usr/local/bin/$$alias; \
+		echo "Created alias: $$alias -> $(BINARY)"; \
+	done
+	@echo ""
+	@echo "You can now use: vmterminal, vmt, or vmterm"
 
 # Uninstall from /usr/local/bin
 uninstall:
 	sudo rm -f /usr/local/bin/$(BINARY)
-	@echo "Uninstalled from /usr/local/bin/$(BINARY)"
+	@for alias in $(ALIASES); do \
+		sudo rm -f /usr/local/bin/$$alias; \
+	done
+	@echo "Uninstalled $(BINARY) and aliases from /usr/local/bin"
+
+# Create local aliases (for development)
+aliases: build
+	ln -sf $(BINARY) vmt
+	ln -sf $(BINARY) vmterm
+	@echo "Created local aliases: vmt, vmterm"
 
 # Run the VM
 run: build

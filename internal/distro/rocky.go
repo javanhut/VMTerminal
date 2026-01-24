@@ -74,9 +74,17 @@ func (p *RockyProvider) toRockyArch(arch Arch) string {
 	}
 }
 
-// NeedsKernelExtraction returns true because Rocky kernel is inside rootfs.
-func (p *RockyProvider) NeedsKernelExtraction() bool {
-	return true
+// KernelLocator returns patterns for finding kernel in Rocky qcow2 image.
+func (p *RockyProvider) KernelLocator() *KernelLocator {
+	return &KernelLocator{
+		KernelPatterns: []string{
+			"boot/vmlinuz-*",
+		},
+		InitrdPatterns: []string{
+			"boot/initramfs-*.img",
+		},
+		ArchiveType: "qcow2",
+	}
 }
 
 func init() {

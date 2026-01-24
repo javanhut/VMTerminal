@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	archVersion = "latest"
-	archBaseURL = "https://geo.mirror.pkgbuild.com/images"
+	archISOBase = "https://geo.mirror.pkgbuild.com/iso/latest"
 )
 
 // ArchProvider implements Provider for Arch Linux.
@@ -26,19 +26,21 @@ func NewArchProvider() *ArchProvider {
 }
 
 // AssetURLs returns download URLs for Arch Linux.
-// Arch provides a bootstrap tarball that contains the base system.
-// Kernel needs to be extracted from the rootfs /boot directory.
+// Kernel and initramfs are extracted from the ISO.
+// Rootfs uses the bootstrap tarball.
 func (p *ArchProvider) AssetURLs(arch Arch) (*AssetURLs, error) {
 	if !p.SupportsArch(arch) {
 		return nil, &ErrUnsupportedArch{Distro: p.id, Arch: arch}
 	}
 
-	// Arch provides cloudimg which has kernel inside
-	// We'll use the cloud image rootfs
+	// Use ISO for kernel extraction (marked with iso: prefix)
+	// The asset manager will handle downloading the ISO and extracting
+	isoURL := fmt.Sprintf("%s/archlinux-x86_64.iso", archISOBase)
+
 	return &AssetURLs{
-		Kernel:  "", // Extracted from rootfs
-		Initrd:  "", // Extracted from rootfs
-		Rootfs:  fmt.Sprintf("%s/%s/Arch-Linux-x86_64-cloudimg.qcow2", archBaseURL, p.version),
+		Kernel: fmt.Sprintf("iso:%s#/arch/boot/x86_64/vmlinuz-linux", isoURL),
+		Initrd: fmt.Sprintf("iso:%s#/arch/boot/x86_64/initramfs-linux.img", isoURL),
+		Rootfs: fmt.Sprintf("%s/archlinux-bootstrap-x86_64.tar.zst", archISOBase),
 	}, nil
 }
 
@@ -62,9 +64,10 @@ func (p *ArchProvider) SetupRequirements() *SetupRequirements {
 	}
 }
 
-// NeedsKernelExtraction returns true because Arch kernel is inside rootfs.
-func (p *ArchProvider) NeedsKernelExtraction() bool {
-	return true
+// KernelLocator returns nil because Arch uses the iso: URL scheme for direct extraction.
+// The kernel and initrd paths are specified in AssetURLs using the iso: prefix.
+func (p *ArchProvider) KernelLocator() *KernelLocator {
+	return nil
 }
 
 func init() {

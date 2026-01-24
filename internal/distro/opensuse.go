@@ -74,9 +74,19 @@ func (p *OpenSUSEProvider) toSUSEArch(arch Arch) string {
 	}
 }
 
-// NeedsKernelExtraction returns true because OpenSUSE kernel is inside rootfs.
-func (p *OpenSUSEProvider) NeedsKernelExtraction() bool {
-	return true
+// KernelLocator returns patterns for finding kernel in OpenSUSE qcow2 image.
+func (p *OpenSUSEProvider) KernelLocator() *KernelLocator {
+	return &KernelLocator{
+		KernelPatterns: []string{
+			"boot/vmlinuz-*-default",
+			"boot/vmlinuz",
+		},
+		InitrdPatterns: []string{
+			"boot/initrd-*-default",
+			"boot/initrd",
+		},
+		ArchiveType: "qcow2",
+	}
 }
 
 func init() {

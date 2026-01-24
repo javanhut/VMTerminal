@@ -66,6 +66,20 @@ type SetupRequirements struct {
 	NeedsExtraction bool   // Whether rootfs tarball needs extraction
 }
 
+// KernelLocator defines how to find kernel/initrd within an archive.
+type KernelLocator struct {
+	// KernelPatterns - glob patterns to find kernel (tried in order)
+	// e.g., ["boot/vmlinuz-*-generic", "boot/vmlinuz-*", "vmlinuz"]
+	KernelPatterns []string
+
+	// InitrdPatterns - glob patterns to find initrd (tried in order)
+	// e.g., ["boot/initrd.img-*-generic", "boot/initramfs-*.img", "initrd"]
+	InitrdPatterns []string
+
+	// ArchiveType - "tarball", "qcow2", or "iso"
+	ArchiveType string
+}
+
 // Provider defines the interface for distribution-specific configuration.
 type Provider interface {
 	// ID returns the unique identifier for this distribution.
@@ -95,6 +109,10 @@ type Provider interface {
 	// CacheSubdir returns the subdirectory name for caching assets.
 	// Format: {distro}/{version}/{arch}
 	CacheSubdir(arch Arch) string
+
+	// KernelLocator returns patterns for finding kernel in rootfs.
+	// Returns nil if kernel is provided via direct URL.
+	KernelLocator() *KernelLocator
 }
 
 // BaseProvider implements common Provider functionality.
@@ -138,6 +156,12 @@ func (p *BaseProvider) SupportsArch(arch Arch) bool {
 // CacheSubdir returns the cache subdirectory.
 func (p *BaseProvider) CacheSubdir(arch Arch) string {
 	return fmt.Sprintf("%s/%s/%s", p.id, p.version, arch)
+}
+
+// KernelLocator returns nil by default (kernel provided via direct URL).
+// Override in providers that need kernel extraction from rootfs.
+func (p *BaseProvider) KernelLocator() *KernelLocator {
+	return nil
 }
 
 // ErrUnsupportedArch is returned when an architecture is not supported.

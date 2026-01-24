@@ -5,14 +5,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/javanstorm/vmterminal/internal/config"
 	"github.com/javanstorm/vmterminal/internal/vm"
 	"github.com/spf13/cobra"
 )
 
 var snapshotCmd = &cobra.Command{
 	Use:   "snapshot",
-	Short: "Manage VM snapshots",
+	Short: "Backup/restore VM state",
 	Long:  `Create, list, restore, and delete VM disk snapshots.`,
 }
 
@@ -27,7 +26,7 @@ var snapshotCreateCmd = &cobra.Command{
 var snapshotListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List snapshots",
-	Long:  `List all snapshots for the current VM.`,
+	Long:  `List all snapshots for the VM.`,
 	RunE:  runSnapshotList,
 }
 
@@ -55,80 +54,40 @@ var snapshotShowCmd = &cobra.Command{
 	RunE:  runSnapshotShow,
 }
 
-var (
-	snapshotVMName      string
-	snapshotDescription string
-)
+var snapshotDescription string
 
 func init() {
-	// Add --vm flag to all snapshot commands
-	snapshotCmd.PersistentFlags().StringVar(&snapshotVMName, "vm", "", "VM to target (default: active VM)")
-
-	// Add --description flag to create
 	snapshotCreateCmd.Flags().StringVarP(&snapshotDescription, "description", "d", "", "Description for the snapshot")
 
-	// Add subcommands
 	snapshotCmd.AddCommand(snapshotCreateCmd)
 	snapshotCmd.AddCommand(snapshotListCmd)
 	snapshotCmd.AddCommand(snapshotRestoreCmd)
 	snapshotCmd.AddCommand(snapshotDeleteCmd)
 	snapshotCmd.AddCommand(snapshotShowCmd)
-
-	// Register snapshot command
-	rootCmd.AddCommand(snapshotCmd)
 }
 
-// getSnapshotManager returns a SnapshotManager and the VM name to use.
+// getSnapshotManager returns a SnapshotManager for the default VM.
 func getSnapshotManager() (*vm.SnapshotManager, string, error) {
-	cfg := config.Global
-	if cfg == nil {
-		if err := config.Load(); err != nil {
-			cfg = config.DefaultConfig()
-		} else {
-			cfg = config.Global
-		}
-	}
-
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, "", fmt.Errorf("get home dir: %w", err)
 	}
 	baseDir := filepath.Join(homeDir, ".vmterminal")
 
-	registry := vm.NewRegistry(baseDir)
-	var vmEntry *vm.VMEntry
-
-	if snapshotVMName != "" {
-		vmEntry, err = registry.GetVM(snapshotVMName)
-		if err != nil {
-			return nil, "", fmt.Errorf("get VM: %w", err)
-		}
-	} else {
-		vmEntry, err = registry.GetActiveOrDefault(cfg.Distro, cfg.CPUs, cfg.MemoryMB, cfg.DiskSizeMB)
-		if err != nil {
-			return nil, "", fmt.Errorf("get active VM: %w", err)
-		}
-	}
-
 	mgr := vm.NewSnapshotManager(baseDir)
-	return mgr, vmEntry.Name, nil
+	return mgr, "default", nil
 }
 
-// isVMRunning checks if a VM appears to be running.
-// This is a simple heuristic - checks for PID file or common indicators.
-func isVMRunning(baseDir, vmName string) bool {
-	// Check for PID file in VM data directory
+// isSnapshotVMRunning checks if the VM appears to be running.
+func isSnapshotVMRunning(baseDir, vmName string) bool {
 	pidFile := filepath.Join(baseDir, "data", vmName, "vm.pid")
 	if _, err := os.Stat(pidFile); err == nil {
-		// PID file exists, check if process is still running
 		data, err := os.ReadFile(pidFile)
 		if err == nil {
 			var pid int
 			if _, err := fmt.Sscanf(string(data), "%d", &pid); err == nil {
-				// Check if process exists
 				process, err := os.FindProcess(pid)
 				if err == nil {
-					// On Unix, FindProcess always succeeds, so we try to signal
 					if err := process.Signal(os.Signal(nil)); err == nil {
 						return true
 					}
@@ -137,7 +96,6 @@ func isVMRunning(baseDir, vmName string) bool {
 		}
 	}
 
-	// Also check for lock file
 	lockFile := filepath.Join(baseDir, "data", vmName, ".running")
 	if _, err := os.Stat(lockFile); err == nil {
 		return true
@@ -154,14 +112,13 @@ func runSnapshotCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Creating snapshot '%s' for VM '%s'...\n", name, vmName)
+	fmt.Printf("Creating snapshot '%s'...\n", name)
 	fmt.Println("This may take a while depending on disk size...")
 
 	if err := mgr.CreateSnapshot(vmName, name, snapshotDescription); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
 
-	// Get snapshot size
 	size, err := mgr.SnapshotFileSize(vmName, name)
 	if err == nil {
 		fmt.Printf("Snapshot created: %s (%.2f MB compressed)\n", name, float64(size)/(1024*1024))
@@ -184,11 +141,11 @@ func runSnapshotList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(snapshots) == 0 {
-		fmt.Printf("No snapshots for VM '%s'. Create one with: vmterminal snapshot create <name>\n", vmName)
+		fmt.Println("No snapshots found. Create one with: vmterminal snapshot create <name>")
 		return nil
 	}
 
-	fmt.Printf("Snapshots for VM '%s':\n", vmName)
+	fmt.Println("Snapshots:")
 	for _, snap := range snapshots {
 		size, _ := mgr.SnapshotFileSize(vmName, snap.Name)
 		fmt.Printf("  %s\n", snap.Name)
@@ -220,11 +177,11 @@ func runSnapshotRestore(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if VM is running
-	if isVMRunning(baseDir, vmName) {
-		fmt.Printf("Error: VM '%s' appears to be running.\n", vmName)
+	if isSnapshotVMRunning(baseDir, vmName) {
+		fmt.Println("Error: VM appears to be running.")
 		fmt.Println("Please stop the VM before restoring a snapshot:")
 		fmt.Println("  Press Ctrl+C in the VM terminal, or")
-		fmt.Println("  Stop the VM process")
+		fmt.Println("  Run 'vmterminal stop'")
 		return fmt.Errorf("VM is running")
 	}
 
@@ -234,7 +191,7 @@ func runSnapshotRestore(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get snapshot: %w", err)
 	}
 
-	fmt.Printf("Restoring VM '%s' from snapshot '%s'...\n", vmName, name)
+	fmt.Printf("Restoring from snapshot '%s'...\n", name)
 	fmt.Printf("  Created: %s\n", snap.CreatedAt.Format("2006-01-02 15:04:05"))
 	fmt.Println()
 	fmt.Println("WARNING: This will overwrite the current disk!")
@@ -283,7 +240,6 @@ func runSnapshotShow(cmd *cobra.Command, args []string) error {
 	size, _ := mgr.SnapshotFileSize(vmName, name)
 
 	fmt.Printf("Snapshot: %s\n", snap.Name)
-	fmt.Printf("  VM: %s\n", snap.VMName)
 	fmt.Printf("  Created: %s\n", snap.CreatedAt.Format("2006-01-02 15:04:05"))
 	if snap.Description != "" {
 		fmt.Printf("  Description: %s\n", snap.Description)

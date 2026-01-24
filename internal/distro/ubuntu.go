@@ -35,14 +35,11 @@ func (p *UbuntuProvider) AssetURLs(arch Arch) (*AssetURLs, error) {
 
 	ubuntuArch := p.toUbuntuArch(arch)
 
-	// Ubuntu provides root.tar.xz which contains the rootfs
-	// Kernel and initrd are inside /boot/ in the rootfs
+	// Ubuntu cloud images: use .img (qcow2) which contains kernel/initrd in /boot
 	return &AssetURLs{
-		// Ubuntu cloud images need kernel extracted from rootfs
-		// We'll use their -root.tar.xz which is a rootfs tarball
-		Kernel:  "", // Extracted from rootfs
-		Initrd:  "", // Extracted from rootfs
-		Rootfs:  fmt.Sprintf("%s/%s/current/%s-server-cloudimg-%s-root.tar.xz", ubuntuBaseURL, ubuntuCodename, ubuntuCodename, ubuntuArch),
+		Kernel: "", // Extracted from rootfs
+		Initrd: "", // Extracted from rootfs
+		Rootfs: fmt.Sprintf("%s/%s/current/%s-server-cloudimg-%s.img", ubuntuBaseURL, ubuntuCodename, ubuntuCodename, ubuntuArch),
 	}, nil
 }
 
@@ -60,9 +57,9 @@ func (p *UbuntuProvider) BootConfig(arch Arch) *BootConfig {
 // SetupRequirements returns setup requirements for Ubuntu.
 func (p *UbuntuProvider) SetupRequirements() *SetupRequirements {
 	return &SetupRequirements{
-		NeedsFormatting: true,
+		NeedsFormatting: false, // qcow2 already formatted
 		FSType:          "ext4",
-		NeedsExtraction: true,
+		NeedsExtraction: false, // rootfs is the disk image itself
 	}
 }
 
@@ -78,9 +75,21 @@ func (p *UbuntuProvider) toUbuntuArch(arch Arch) string {
 	}
 }
 
-// NeedsKernelExtraction returns true because Ubuntu kernel is inside rootfs.
-func (p *UbuntuProvider) NeedsKernelExtraction() bool {
-	return true
+// KernelLocator returns patterns for finding kernel in Ubuntu rootfs.
+func (p *UbuntuProvider) KernelLocator() *KernelLocator {
+	return &KernelLocator{
+		KernelPatterns: []string{
+			"boot/vmlinuz-*-generic",
+			"boot/vmlinuz-*",
+			"vmlinuz",
+		},
+		InitrdPatterns: []string{
+			"boot/initrd.img-*-generic",
+			"boot/initrd.img-*",
+			"initrd.img",
+		},
+		ArchiveType: "qcow2",
+	}
 }
 
 func init() {

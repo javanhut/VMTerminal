@@ -119,13 +119,18 @@ func (m *RootfsManager) ExtractRootfs(diskName, rootfsPath string) error {
 	defer m.unmountDisk(mountPoint)
 
 	// Determine extraction command based on archive type
+	// sudo is required since the mount point is owned by root
 	var extractCmd *exec.Cmd
 	if strings.HasSuffix(rootfsPath, ".tar.gz") || strings.HasSuffix(rootfsPath, ".tgz") {
-		extractCmd = exec.Command("tar", "-xzf", rootfsPath, "-C", mountPoint)
+		extractCmd = exec.Command("sudo", "tar", "-xzf", rootfsPath, "-C", mountPoint)
 	} else if strings.HasSuffix(rootfsPath, ".tar.xz") {
-		extractCmd = exec.Command("tar", "-xJf", rootfsPath, "-C", mountPoint)
+		extractCmd = exec.Command("sudo", "tar", "-xJf", rootfsPath, "-C", mountPoint)
+	} else if strings.HasSuffix(rootfsPath, ".tar.zst") {
+		// Arch Linux uses zstd compression
+		// Bootstrap tarball has root.x86_64/ prefix that needs stripping
+		extractCmd = exec.Command("sudo", "tar", "--zstd", "-xf", rootfsPath, "-C", mountPoint, "--strip-components=1")
 	} else if strings.HasSuffix(rootfsPath, ".tar") {
-		extractCmd = exec.Command("tar", "-xf", rootfsPath, "-C", mountPoint)
+		extractCmd = exec.Command("sudo", "tar", "-xf", rootfsPath, "-C", mountPoint)
 	} else if strings.HasSuffix(rootfsPath, ".qcow2") {
 		// For qcow2 images, we need to use qemu-img and then copy
 		return m.extractQcow2(rootfsPath, mountPoint)
@@ -145,7 +150,7 @@ func (m *RootfsManager) ExtractRootfs(diskName, rootfsPath string) error {
 
 // mountDisk mounts a disk image to a mount point.
 func (m *RootfsManager) mountDisk(diskPath, mountPoint string) error {
-	cmd := exec.Command("mount", "-o", "loop", diskPath, mountPoint)
+	cmd := exec.Command("sudo", "mount", "-o", "loop", diskPath, mountPoint)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -153,7 +158,7 @@ func (m *RootfsManager) mountDisk(diskPath, mountPoint string) error {
 
 // unmountDisk unmounts a disk from a mount point.
 func (m *RootfsManager) unmountDisk(mountPoint string) error {
-	cmd := exec.Command("umount", mountPoint)
+	cmd := exec.Command("sudo", "umount", mountPoint)
 	return cmd.Run()
 }
 

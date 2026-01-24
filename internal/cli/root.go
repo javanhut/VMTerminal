@@ -3,29 +3,25 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
-	"github.com/javanstorm/vmterminal/internal/config"
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "vmterminal",
-	Short: "VMTerminal - Linux VM as your shell",
-	Long: `VMTerminal runs a Linux VM as your default shell on macOS and Linux.
+	Short: "VMTerminal - Linux VM as your terminal",
+	Long: `VMTerminal runs a Linux VM as your default terminal on macOS and Linux.
 
-Open your terminal and you're in Linux — seamless, fast, with full access
-to host files. Like WSL, but for non-Windows systems.
+One intelligent command that handles everything interactively.
+No separate setup steps, no static config files.
 
-The goal is invisible virtualization — the VM should feel like the native OS.`,
+Just run 'vmterminal' or 'vmterminal run --distro arch' and it does everything.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Skip config loading for commands that don't need it
-		switch cmd.Name() {
-		case "version", "completion", "status", "stop", "install", "attach", "setup", "docker-setup", "podman-setup":
-			return nil
-		}
-		return config.Load()
+	// When run without subcommand, execute 'run'
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runRun(cmd, args)
 	},
 }
 
@@ -37,13 +33,38 @@ func Execute() error {
 	return nil
 }
 
+// IsLoginShell returns true if invoked as a login shell.
+// Login shells are invoked with argv[0] prefixed with '-' by convention.
+func IsLoginShell() bool {
+	if len(os.Args) == 0 {
+		return false
+	}
+	arg0 := os.Args[0]
+	if len(arg0) == 0 {
+		return false
+	}
+	return arg0[0] == '-'
+}
+
+// RunShellMode runs vmterminal as a login shell.
+// This is called from main.go when detected as login shell.
+func RunShellMode() {
+	if err := runRun(nil, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "vmterminal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func init() {
-	// Add subcommands
-	rootCmd.AddCommand(versionCmd)
+	// Add subcommands - minimal set per new design
 	rootCmd.AddCommand(runCmd)
-	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(stopCmd)
-	rootCmd.AddCommand(shellCmd)
-	rootCmd.AddCommand(installCmd)
-	rootCmd.AddCommand(setupCmd)
+	rootCmd.AddCommand(reloadCmd)
+	rootCmd.AddCommand(defaultCmd)
+	rootCmd.AddCommand(switchCmd)
+	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(snapshotCmd)
+	rootCmd.AddCommand(cacheCmd)
+	rootCmd.AddCommand(versionCmd)
 }
