@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/javanstorm/vmterminal/internal/config"
 	"github.com/javanstorm/vmterminal/internal/distro"
@@ -50,6 +51,17 @@ func runCacheClear(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		// Clear specific distro
 		distroID := args[0]
+
+		// Validate distro ID before using in path
+		if !distro.IsRegistered(distro.ID(distroID)) {
+			validIDs := distro.List()
+			validNames := make([]string, len(validIDs))
+			for i, id := range validIDs {
+				validNames[i] = string(id)
+			}
+			return fmt.Errorf("unknown distro: %s (valid: %s)", distroID, strings.Join(validNames, ", "))
+		}
+
 		targetDir := filepath.Join(cacheDir, distroID)
 
 		if _, err := os.Stat(targetDir); os.IsNotExist(err) {
@@ -118,7 +130,8 @@ func dirSize(path string) (int64, error) {
 	var size int64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // Skip errors
+			// Return error instead of silently skipping
+			return err
 		}
 		if info != nil && !info.IsDir() {
 			size += info.Size()
