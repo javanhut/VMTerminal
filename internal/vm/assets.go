@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/javanstorm/vmterminal/internal/distro"
 )
@@ -35,7 +36,14 @@ type AssetPaths struct {
 
 // EnsureAssets downloads kernel, initramfs, and rootfs if not already cached.
 // Returns paths to the assets.
+// Warm path: If all assets exist, returns cached paths immediately without network calls.
 func (m *AssetManager) EnsureAssets() (*AssetPaths, error) {
+	// Fast warm path: check if all assets already exist
+	if exist, _ := m.AssetsExist(); exist {
+		return m.GetAssetPaths()
+	}
+
+	// Cold path: need to download/extract assets
 	arch := distro.CurrentArch()
 	if arch == "" {
 		return nil, fmt.Errorf("unsupported architecture")
@@ -151,6 +159,7 @@ func (m *AssetManager) SetupRequirements() *distro.SetupRequirements {
 
 // GetAssetPaths returns paths for cached assets without downloading.
 // Returns nil paths for assets that don't exist.
+// Uses parallel file checks for better warm path performance.
 func (m *AssetManager) GetAssetPaths() (*AssetPaths, error) {
 	arch := distro.CurrentArch()
 	if arch == "" {
@@ -160,25 +169,49 @@ func (m *AssetManager) GetAssetPaths() (*AssetPaths, error) {
 	cacheSubdir := filepath.Join(m.cacheDir, m.provider.CacheSubdir(arch))
 	paths := &AssetPaths{}
 
-	kernelPath := filepath.Join(cacheSubdir, "vmlinuz")
-	if _, err := os.Stat(kernelPath); err == nil {
-		paths.Kernel = kernelPath
-	}
+	// Check kernel, initramfs, and rootfs in parallel
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 
-	initramfsPath := filepath.Join(cacheSubdir, "initramfs")
-	if _, err := os.Stat(initramfsPath); err == nil {
-		paths.Initramfs = initramfsPath
-	}
+	wg.Add(3)
 
-	// Check for rootfs with various extensions
-	for _, ext := range []string{".tar.gz", ".tar.xz", ".tar.zst", ".qcow2"} {
-		rootfsPath := filepath.Join(cacheSubdir, "rootfs"+ext)
-		if _, err := os.Stat(rootfsPath); err == nil {
-			paths.Rootfs = rootfsPath
-			break
+	// Check kernel
+	go func() {
+		defer wg.Done()
+		kernelPath := filepath.Join(cacheSubdir, "vmlinuz")
+		if _, err := os.Stat(kernelPath); err == nil {
+			mu.Lock()
+			paths.Kernel = kernelPath
+			mu.Unlock()
 		}
-	}
+	}()
 
+	// Check initramfs
+	go func() {
+		defer wg.Done()
+		initramfsPath := filepath.Join(cacheSubdir, "initramfs")
+		if _, err := os.Stat(initramfsPath); err == nil {
+			mu.Lock()
+			paths.Initramfs = initramfsPath
+			mu.Unlock()
+		}
+	}()
+
+	// Check rootfs with various extensions
+	go func() {
+		defer wg.Done()
+		for _, ext := range []string{".tar.gz", ".tar.xz", ".tar.zst", ".qcow2"} {
+			rootfsPath := filepath.Join(cacheSubdir, "rootfs" + ext)
+			if _, err := os.Stat(rootfsPath); err == nil {
+				mu.Lock()
+				paths.Rootfs = rootfsPath
+				mu.Unlock()
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 	return paths, nil
 }
 
