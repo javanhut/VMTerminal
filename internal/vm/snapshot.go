@@ -2,6 +2,7 @@ package vm
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ type SnapshotEntry struct {
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
 	DiskSize    int64     `json:"disk_size"` // Original uncompressed size in bytes
+	Checksum    string    `json:"checksum"`  // SHA256 of compressed file
 }
 
 // SnapshotData holds all snapshots for a VM.
@@ -103,7 +105,11 @@ func (m *SnapshotManager) Save(vmName string, data *SnapshotData) error {
 }
 
 // CreateSnapshot creates a new snapshot by compressing the VM disk.
+// Uses atomic temp file + rename to prevent corruption on interrupted writes.
 func (m *SnapshotManager) CreateSnapshot(vmName, snapshotName, description string) error {
+	// Clean up any previous partial operations
+	m.CleanupPartial(vmName)
+
 	// Check if disk exists
 	diskPath := m.diskPath(vmName)
 	diskInfo, err := os.Stat(diskPath)
@@ -140,9 +146,10 @@ func (m *SnapshotManager) CreateSnapshot(vmName, snapshotName, description strin
 	}
 	defer srcFile.Close()
 
-	// Create compressed snapshot file
+	// Create compressed snapshot file using temp file for atomic operation
 	snapPath := m.snapshotPath(vmName, snapshotName)
-	dstFile, err := os.Create(snapPath)
+	tmpPath := snapPath + ".tmp"
+	dstFile, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create snapshot file: %w", err)
 	}
@@ -154,23 +161,43 @@ func (m *SnapshotManager) CreateSnapshot(vmName, snapshotName, description strin
 
 	// Copy disk to gzip
 	if _, err := io.Copy(gzWriter, srcFile); err != nil {
-		os.Remove(snapPath) // Clean up on failure
+		os.Remove(tmpPath) // Clean up temp file on failure
 		return fmt.Errorf("compress disk: %w", err)
 	}
 
 	// Ensure gzip is flushed
 	if err := gzWriter.Close(); err != nil {
-		os.Remove(snapPath)
+		os.Remove(tmpPath)
 		return fmt.Errorf("finalize compression: %w", err)
 	}
 
-	// Create snapshot entry
+	// Close destination file before rename
+	if err := dstFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close snapshot file: %w", err)
+	}
+
+	// Atomic rename: temp file -> final path
+	if err := os.Rename(tmpPath, snapPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("finalize snapshot: %w", err)
+	}
+
+	// Compute checksum of the final snapshot file
+	checksum, err := m.computeChecksum(snapPath)
+	if err != nil {
+		os.Remove(snapPath)
+		return fmt.Errorf("compute checksum: %w", err)
+	}
+
+	// Create snapshot entry with checksum
 	entry := SnapshotEntry{
 		Name:        snapshotName,
 		VMName:      vmName,
 		Description: description,
 		CreatedAt:   time.Now(),
 		DiskSize:    diskInfo.Size(),
+		Checksum:    checksum,
 	}
 
 	data.Snapshots = append(data.Snapshots, entry)
@@ -211,15 +238,30 @@ func (m *SnapshotManager) GetSnapshot(vmName, snapshotName string) (*SnapshotEnt
 
 // RestoreSnapshot restores a VM disk from a snapshot.
 // WARNING: This overwrites the current disk! VM must be stopped.
+// Verifies checksum before restoration to detect corruption.
 func (m *SnapshotManager) RestoreSnapshot(vmName, snapshotName string) error {
+	// Clean up any previous partial operations
+	m.CleanupPartial(vmName)
+
 	// Verify snapshot exists
-	_, err := m.GetSnapshot(vmName, snapshotName)
+	snap, err := m.GetSnapshot(vmName, snapshotName)
 	if err != nil {
 		return err
 	}
 
 	snapPath := m.snapshotPath(vmName, snapshotName)
 	diskPath := m.diskPath(vmName)
+
+	// Verify checksum before restore (if checksum exists)
+	if snap.Checksum != "" {
+		checksum, err := m.computeChecksum(snapPath)
+		if err != nil {
+			return fmt.Errorf("verify checksum: %w", err)
+		}
+		if checksum != snap.Checksum {
+			return fmt.Errorf("snapshot corrupted: checksum mismatch")
+		}
+	}
 
 	// Open compressed snapshot
 	srcFile, err := os.Open(snapPath)
@@ -302,4 +344,92 @@ func (m *SnapshotManager) SnapshotFileSize(vmName, snapshotName string) (int64, 
 		return 0, fmt.Errorf("stat snapshot: %w", err)
 	}
 	return info.Size(), nil
+}
+
+// VerifySnapshot verifies the integrity of a snapshot by checking its checksum.
+// Returns nil if the snapshot is valid, or an error describing the issue.
+func (m *SnapshotManager) VerifySnapshot(vmName, snapshotName string) error {
+	snap, err := m.GetSnapshot(vmName, snapshotName)
+	if err != nil {
+		return err
+	}
+
+	if snap.Checksum == "" {
+		return fmt.Errorf("snapshot has no checksum (created before checksum support)")
+	}
+
+	snapPath := m.snapshotPath(vmName, snapshotName)
+	checksum, err := m.computeChecksum(snapPath)
+	if err != nil {
+		return fmt.Errorf("compute checksum: %w", err)
+	}
+
+	if checksum != snap.Checksum {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", snap.Checksum, checksum)
+	}
+
+	return nil
+}
+
+// computeChecksum calculates the SHA256 checksum of a file.
+func (m *SnapshotManager) computeChecksum(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// CleanupPartial removes any partial/interrupted snapshot files.
+// Call on startup or before operations to ensure clean state.
+func (m *SnapshotManager) CleanupPartial(vmName string) error {
+	snapshotsDir := m.snapshotsDir(vmName)
+
+	// Clean up .tmp files (interrupted creates)
+	tmpFiles, _ := filepath.Glob(filepath.Join(snapshotsDir, "*.tmp"))
+	for _, f := range tmpFiles {
+		os.Remove(f)
+	}
+
+	// Clean up .restoring files (interrupted restores)
+	dataDir := filepath.Join(m.baseDir, "data", vmName)
+	restoringFiles, _ := filepath.Glob(filepath.Join(dataDir, "*.restoring"))
+	for _, f := range restoringFiles {
+		os.Remove(f)
+	}
+
+	// Clean up orphaned metadata temp files
+	metaTmp := m.snapshotsFile(vmName) + ".tmp"
+	os.Remove(metaTmp)
+
+	return nil
+}
+
+// HasPartialFiles returns true if there are leftover temp files from interrupted operations.
+func (m *SnapshotManager) HasPartialFiles(vmName string) bool {
+	snapshotsDir := m.snapshotsDir(vmName)
+	dataDir := filepath.Join(m.baseDir, "data", vmName)
+
+	tmpFiles, _ := filepath.Glob(filepath.Join(snapshotsDir, "*.tmp"))
+	if len(tmpFiles) > 0 {
+		return true
+	}
+
+	restoringFiles, _ := filepath.Glob(filepath.Join(dataDir, "*.restoring"))
+	if len(restoringFiles) > 0 {
+		return true
+	}
+
+	metaTmp := m.snapshotsFile(vmName) + ".tmp"
+	if _, err := os.Stat(metaTmp); err == nil {
+		return true
+	}
+
+	return false
 }

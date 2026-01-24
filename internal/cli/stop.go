@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -15,8 +16,19 @@ var stopCmd = &cobra.Command{
 	Long: `Stop the running VM gracefully.
 
 If the VM is running in the foreground, use Ctrl+C instead.
-This command attempts to stop a VM that may be running in another terminal.`,
+This command attempts to stop a VM that may be running in another terminal.
+
+Examples:
+  vmt stop           # Graceful shutdown (SIGTERM)
+  vmt stop --force   # Force kill (SIGKILL)
+  vmt stop -f        # Force kill (short form)`,
 	RunE: runStop,
+}
+
+var stopForce bool
+
+func init() {
+	stopCmd.Flags().BoolVarP(&stopForce, "force", "f", false, "Force kill the VM (SIGKILL)")
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
@@ -26,9 +38,10 @@ func runStop(cmd *cobra.Command, args []string) error {
 	}
 	baseDir := filepath.Join(homeDir, ".vmterminal")
 	vmName := "default"
+	dataDir := filepath.Join(baseDir, "data", vmName)
 
 	// Check for PID file
-	pidFile := filepath.Join(baseDir, "data", vmName, "vm.pid")
+	pidFile := filepath.Join(dataDir, "vm.pid")
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -48,31 +61,45 @@ func runStop(cmd *cobra.Command, args []string) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		fmt.Printf("VM process (PID %d) not found.\n", pid)
-		// Clean up stale PID file
-		os.Remove(pidFile)
+		cleanupVMFiles(dataDir, pidFile)
 		return nil
 	}
 
 	// Try to signal the process to check if it's running
 	if err := process.Signal(syscall.Signal(0)); err != nil {
-		fmt.Printf("VM process (PID %d) is not running.\n", pid)
-		// Clean up stale PID file
-		os.Remove(pidFile)
+		fmt.Printf("VM process (PID %d) is not running (stale PID).\n", pid)
+		cleanupVMFiles(dataDir, pidFile)
+		fmt.Println("Cleaned up stale PID file.")
 		return nil
 	}
 
-	// Send SIGTERM for graceful shutdown
-	fmt.Printf("Stopping VM (PID %d)...\n", pid)
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("send SIGTERM: %w", err)
+	if stopForce {
+		// Force kill with SIGKILL
+		fmt.Printf("Force killing VM (PID %d)...\n", pid)
+		if err := process.Signal(syscall.SIGKILL); err != nil {
+			return fmt.Errorf("send SIGKILL: %w", err)
+		}
+		// Wait a moment for process to die
+		time.Sleep(500 * time.Millisecond)
+		cleanupVMFiles(dataDir, pidFile)
+		fmt.Println("VM force killed.")
+	} else {
+		// Send SIGTERM for graceful shutdown
+		fmt.Printf("Stopping VM (PID %d)...\n", pid)
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			return fmt.Errorf("send SIGTERM: %w", err)
+		}
+		fmt.Println("Stop signal sent.")
+		fmt.Println("The VM should shut down gracefully.")
+		fmt.Println("Use 'vmt stop --force' if it doesn't respond.")
 	}
 
-	fmt.Println("Stop signal sent.")
-	fmt.Println("The VM should shut down gracefully.")
-
-	// Clean up lock file if present
-	lockFile := filepath.Join(baseDir, "data", vmName, ".running")
-	os.Remove(lockFile)
-
 	return nil
+}
+
+// cleanupVMFiles removes PID file and lock file
+func cleanupVMFiles(dataDir, pidFile string) {
+	os.Remove(pidFile)
+	lockFile := filepath.Join(dataDir, ".running")
+	os.Remove(lockFile)
 }

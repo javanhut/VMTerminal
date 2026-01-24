@@ -101,6 +101,21 @@ func (m *AssetManager) EnsureAssets() (*AssetPaths, error) {
 			paths.Kernel = kernelPath
 			paths.Initramfs = initrdPath
 		}
+
+		// For qcow2 images that don't need extraction (like Ubuntu cloud images),
+		// convert to raw format so it can be used as the root disk
+		setupReqs := m.provider.SetupRequirements()
+		if setupReqs != nil && !setupReqs.NeedsExtraction && locator.ArchiveType == "qcow2" {
+			rawPath := filepath.Join(cacheSubdir, "rootfs.raw")
+			if _, err := os.Stat(rawPath); os.IsNotExist(err) {
+				fmt.Printf("Converting %s to raw format...\n", filepath.Base(paths.Rootfs))
+				if err := m.convertQcow2ToRaw(paths.Rootfs, rawPath); err != nil {
+					return nil, fmt.Errorf("convert qcow2 to raw: %w", err)
+				}
+			}
+			// Update rootfs path to point to raw image
+			paths.Rootfs = rawPath
+		}
 	} else {
 		// Direct download (Alpine-style or iso: URL scheme)
 		// Download kernel if URL is provided
@@ -198,10 +213,20 @@ func (m *AssetManager) GetAssetPaths() (*AssetPaths, error) {
 	}()
 
 	// Check rootfs with various extensions
+	// For qcow2-based distros that don't need extraction, prefer .raw (converted) version
 	go func() {
 		defer wg.Done()
-		for _, ext := range []string{".tar.gz", ".tar.xz", ".tar.zst", ".qcow2"} {
-			rootfsPath := filepath.Join(cacheSubdir, "rootfs" + ext)
+		// Check for converted raw image first (used for qcow2-based distros like Ubuntu)
+		rawPath := filepath.Join(cacheSubdir, "rootfs.raw")
+		if _, err := os.Stat(rawPath); err == nil {
+			mu.Lock()
+			paths.Rootfs = rawPath
+			mu.Unlock()
+			return
+		}
+		// Fall back to other formats
+		for _, ext := range []string{".tar.gz", ".tar.xz", ".tar.zst", ".qcow2", ".img"} {
+			rootfsPath := filepath.Join(cacheSubdir, "rootfs"+ext)
 			if _, err := os.Stat(rootfsPath); err == nil {
 				mu.Lock()
 				paths.Rootfs = rootfsPath
@@ -411,4 +436,24 @@ func (m *AssetManager) downloadFile(path, url string) error {
 	}
 
 	return os.Rename(tmpPath, path)
+}
+
+// convertQcow2ToRaw converts a qcow2 image to raw format using qemu-img.
+func (m *AssetManager) convertQcow2ToRaw(qcow2Path, rawPath string) error {
+	// Ensure qemu-img is available
+	if _, err := exec.LookPath("qemu-img"); err != nil {
+		return fmt.Errorf("qemu-img not found: install qemu-utils package")
+	}
+
+	// Convert to raw format
+	tmpPath := rawPath + ".tmp"
+	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", qcow2Path, tmpPath)
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("qemu-img convert failed: %w", err)
+	}
+
+	return os.Rename(tmpPath, rawPath)
 }

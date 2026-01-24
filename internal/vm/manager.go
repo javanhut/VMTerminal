@@ -156,7 +156,26 @@ func (m *Manager) isWarmPath() bool {
 	if !exist {
 		return false
 	}
-	// Check if disk exists
+
+	// Check if disk exists - depends on distro setup requirements
+	setupReqs := m.assets.SetupRequirements()
+	if setupReqs != nil && !setupReqs.NeedsExtraction {
+		// For qcow2-based distros, check if rootfs.raw exists
+		paths, err := m.assets.GetAssetPaths()
+		if err != nil {
+			return false
+		}
+		// Rootfs path should be the raw converted image
+		if paths.Rootfs == "" {
+			return false
+		}
+		if _, err := os.Stat(paths.Rootfs); err != nil {
+			return false
+		}
+		return true
+	}
+
+	// For extraction-based distros, check if disk exists
 	return m.images.DiskExists(m.cfg.DiskName)
 }
 
@@ -170,7 +189,16 @@ func (m *Manager) warmPrepare(ctx context.Context) error {
 		return m.coldPrepare(ctx)
 	}
 
-	diskPath := m.images.DiskPath(m.cfg.DiskName)
+	// Determine disk path based on distro setup requirements
+	var diskPath string
+	setupReqs := m.assets.SetupRequirements()
+	if setupReqs != nil && !setupReqs.NeedsExtraction && assetPaths.Rootfs != "" {
+		// For qcow2-based distros, use the converted raw image
+		diskPath = assetPaths.Rootfs
+	} else {
+		diskPath = m.images.DiskPath(m.cfg.DiskName)
+	}
+
 	bootConfig := m.assets.BootConfig()
 
 	// Configure and create VM
@@ -214,12 +242,22 @@ func (m *Manager) coldPrepare(ctx context.Context) error {
 		return fmt.Errorf("ensure assets: %w", err)
 	}
 
-	// Create disk image if needed
-	diskPath, err := m.images.EnsureDisk(m.cfg.DiskName, m.cfg.DiskSizeMB)
-	if err != nil {
-		m.state = StateError
-		m.lastErr = err
-		return fmt.Errorf("ensure disk: %w", err)
+	// Determine disk path based on distro setup requirements
+	var diskPath string
+	setupReqs := m.assets.SetupRequirements()
+
+	if setupReqs != nil && !setupReqs.NeedsExtraction && assetPaths.Rootfs != "" {
+		// For distros like Ubuntu where rootfs is the complete disk image,
+		// use the converted raw image directly
+		diskPath = assetPaths.Rootfs
+	} else {
+		// Create disk image if needed (for distros like Alpine that need extraction)
+		diskPath, err = m.images.EnsureDisk(m.cfg.DiskName, m.cfg.DiskSizeMB)
+		if err != nil {
+			m.state = StateError
+			m.lastErr = err
+			return fmt.Errorf("ensure disk: %w", err)
+		}
 	}
 
 	// Get boot config from provider

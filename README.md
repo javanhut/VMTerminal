@@ -35,17 +35,56 @@ sudo usermod -aG kvm $USER
 
 ## Installation
 
+### Homebrew (Recommended for macOS)
+
+```bash
+brew tap javanstorm/vmterminal
+brew install vmterminal
+```
+
+### Binary Download
+
+Download from [GitHub Releases](https://github.com/javanstorm/vmterminal/releases):
+
+```bash
+# macOS (Apple Silicon)
+curl -LO https://github.com/javanstorm/vmterminal/releases/latest/download/vmterminal_darwin_arm64.tar.gz
+tar xzf vmterminal_darwin_arm64.tar.gz
+sudo mv vmterminal /usr/local/bin/
+
+# macOS (Intel)
+curl -LO https://github.com/javanstorm/vmterminal/releases/latest/download/vmterminal_darwin_amd64.tar.gz
+tar xzf vmterminal_darwin_amd64.tar.gz
+sudo mv vmterminal /usr/local/bin/
+
+# Linux (x86_64)
+curl -LO https://github.com/javanstorm/vmterminal/releases/latest/download/vmterminal_linux_amd64.tar.gz
+tar xzf vmterminal_linux_amd64.tar.gz
+sudo mv vmterminal /usr/local/bin/
+
+# Linux (ARM64)
+curl -LO https://github.com/javanstorm/vmterminal/releases/latest/download/vmterminal_linux_arm64.tar.gz
+tar xzf vmterminal_linux_arm64.tar.gz
+sudo mv vmterminal /usr/local/bin/
+```
+
+### From Source
+
 ```bash
 # Clone the repository
 git clone https://github.com/javanstorm/vmterminal.git
 cd vmterminal
 
-# Build
-go build -o vmterminal ./cmd/vmterminal
-
-# Install
-sudo mv vmterminal /usr/local/bin/
+# Build and install
+make install
 ```
+
+### Aliases
+
+VMTerminal installs with convenient aliases:
+- `vmterminal` - Full name
+- `vmt` - Short alias
+- `vmterm` - Medium alias
 
 ## Quick Start
 

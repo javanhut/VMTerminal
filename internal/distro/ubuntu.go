@@ -45,9 +45,12 @@ func (p *UbuntuProvider) AssetURLs(arch Arch) (*AssetURLs, error) {
 
 // BootConfig returns the kernel boot configuration for Ubuntu.
 func (p *UbuntuProvider) BootConfig(arch Arch) *BootConfig {
+	// Ubuntu cloud images have partitioned disks:
+	// - vda1 is typically the root partition with ext4
+	// - Use LABEL=cloudimg-rootfs for reliable detection
 	return &BootConfig{
-		Cmdline:       "console=hvc0 root=/dev/vda rw rootfstype=ext4",
-		RootDevice:    "/dev/vda",
+		Cmdline:       "console=hvc0 root=LABEL=cloudimg-rootfs rw rootfstype=ext4",
+		RootDevice:    "LABEL=cloudimg-rootfs",
 		RootFSType:    "ext4",
 		ConsoleDevice: "hvc0",
 		ExtraModules:  "",

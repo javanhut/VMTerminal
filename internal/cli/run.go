@@ -34,6 +34,62 @@ import (
 // Cold path (first run) adds: asset downloads, disk creation, rootfs extraction.
 // Run with VMT_TIMING=1 to see actual breakdown.
 
+// quietMode suppresses verbose output when running as login shell.
+var quietMode bool
+
+// SetQuietMode enables or disables quiet mode (minimal output).
+func SetQuietMode(quiet bool) {
+	quietMode = quiet
+}
+
+// printIfNotQuiet prints only when not in quiet mode.
+func printIfNotQuiet(format string, args ...interface{}) {
+	if !quietMode {
+		fmt.Printf(format, args...)
+	}
+}
+
+// printlnIfNotQuiet prints a line only when not in quiet mode.
+func printlnIfNotQuiet(args ...interface{}) {
+	if !quietMode {
+		fmt.Println(args...)
+	}
+}
+
+// isVMRunning checks if a VM is already running.
+func isVMRunning(baseDir, vmName string) (bool, int) {
+	pidFile := filepath.Join(baseDir, "data", vmName, "vm.pid")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false, 0
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
+		return false, 0
+	}
+	// Check if process is running
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false, 0
+	}
+	if err := process.Signal(syscall.Signal(0)); err != nil {
+		return false, 0
+	}
+	return true, pid
+}
+
+// writePIDFile creates a PID file for the current process.
+func writePIDFile(baseDir, vmName string) error {
+	pidFile := filepath.Join(baseDir, "data", vmName, "vm.pid")
+	return os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+}
+
+// cleanupPIDFile removes the PID file.
+func cleanupPIDFile(baseDir, vmName string) {
+	pidFile := filepath.Join(baseDir, "data", vmName, "vm.pid")
+	os.Remove(pidFile)
+}
+
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Start VM (handles all setup interactively if needed)",
@@ -56,6 +112,11 @@ func init() {
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
+	// Check if we have a TTY
+	if !terminal.IsTTY() {
+		return fmt.Errorf("no TTY detected; vmterminal requires a terminal")
+	}
+
 	// Initialize timing if VMT_TIMING=1
 	var timer *timing.Timer
 	if os.Getenv("VMT_TIMING") == "1" {
@@ -77,8 +138,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		cfg.Distro = runDistro
 	}
 
-	// Print system information
-	printSystemInfo()
+	// Print system information (skip in quiet mode)
+	if !quietMode {
+		printSystemInfo()
+	}
 
 	// Setup paths
 	homeDir, err := os.UserHomeDir()
@@ -90,6 +153,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Ensure base directory exists
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return fmt.Errorf("create base dir: %w", err)
+	}
+
+	// Check if VM is already running
+	running, pid := isVMRunning(baseDir, "default")
+	if running {
+		if quietMode {
+			// In login shell mode, just inform and exit
+			fmt.Fprintf(os.Stderr, "VM already running (PID %d). Use another terminal or 'vmterminal stop' first.\n", pid)
+			return nil
+		}
+		fmt.Printf("VM is already running (PID %d).\n", pid)
+		fmt.Println("You can:")
+		fmt.Println("  - Open another terminal to get a new session")
+		fmt.Println("  - Run 'vmterminal stop' to stop the VM")
+		fmt.Println("  - Run 'vmterminal status' to see VM state")
+		return nil
 	}
 
 	// Get or prompt for distro
@@ -181,17 +260,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save config: %v\n", err)
 	}
 
-	fmt.Printf("\nDistro: %s %s\n", provider.Name(), provider.Version())
+	printIfNotQuiet("\nDistro: %s %s\n", provider.Name(), provider.Version())
 
 	// Show shared directories
-	if len(sharedDirs) > 0 {
+	if len(sharedDirs) > 0 && !quietMode {
 		fmt.Println("Shared directories (mount with: mount -t virtiofs <tag> <mountpoint>):")
 		for tag, path := range sharedDirs {
 			fmt.Printf("  %s -> %s\n", tag, path)
 		}
 	}
 
-	fmt.Println("\nPreparing VM...")
+	printlnIfNotQuiet("\nPreparing VM...")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -203,7 +282,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		timer.Mark("vm_prepare")
 	}
 
-	fmt.Println("Starting VM...")
+	printlnIfNotQuiet("Starting VM...")
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("start VM: %w", err)
 	}
@@ -211,18 +290,38 @@ func runRun(cmd *cobra.Command, args []string) error {
 		timer.Mark("vm_start")
 	}
 
+	// Write PID file for other processes to detect running VM
+	if err := writePIDFile(baseDir, "default"); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
+	}
+	defer cleanupPIDFile(baseDir, "default")
+
+	// Record boot in state
+	stateFile := vm.NewStateFile(dataDir)
+	if err := stateFile.RecordBoot(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not record boot: %v\n", err)
+	}
+
+	// Track whether we had a clean shutdown
+	cleanShutdown := false
+	defer func() {
+		if err := stateFile.RecordShutdown(cleanShutdown); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not record shutdown: %v\n", err)
+		}
+	}()
+
 	// Get console I/O handles
 	vmIn, vmOut, err := mgr.Console()
 	if err != nil {
 		return fmt.Errorf("get console: %w", err)
 	}
 
-	fmt.Println("Attaching to console (Ctrl+C to stop VM)...")
-	fmt.Println()
+	printlnIfNotQuiet("Attaching to console (Ctrl+C to stop VM)...")
+	printlnIfNotQuiet()
 
-	// Setup signal handler for graceful shutdown
+	// Setup signal handler for graceful shutdown (including SIGHUP for terminal close)
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	// Attach in background, stop on signal
 	attachDone := make(chan error, 1)
@@ -238,16 +337,25 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Wait for either signal or attach completion
 	select {
-	case <-sigCh:
-		fmt.Println("\nStopping VM...")
+	case sig := <-sigCh:
+		if sig == syscall.SIGHUP {
+			// Terminal closed - graceful shutdown without printing (terminal gone)
+		} else {
+			printlnIfNotQuiet("\nStopping VM...")
+		}
 		cancel()
 		if err := mgr.Stop(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Stop error: %v\n", err)
+			// Only log if not SIGHUP (terminal might be gone)
+			if sig != syscall.SIGHUP {
+				fmt.Fprintf(os.Stderr, "Stop error: %v\n", err)
+			}
 		}
+		cleanShutdown = true
 	case err := <-attachDone:
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Attach error: %v\n", err)
 		}
+		cleanShutdown = true // Normal console detach is clean
 	}
 
 	// Wait for VM to exit
@@ -255,7 +363,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("VM exited with error: %w", err)
 	}
 
-	fmt.Println("VM stopped")
+	printlnIfNotQuiet("VM stopped")
 	return nil
 }
 
@@ -311,7 +419,14 @@ func resolveDistro(cfg *config.State) (distro.ID, error) {
 		if distro.IsRegistered(id) {
 			return id, nil
 		}
-		fmt.Printf("Warning: configured distro %q not found\n", cfg.Distro)
+		if !quietMode {
+			fmt.Printf("Warning: configured distro %q not found\n", cfg.Distro)
+		}
+	}
+
+	// In quiet mode, use default without prompting
+	if quietMode {
+		return distro.DefaultID(), nil
 	}
 
 	// For first run, prompt user to select distro
@@ -368,41 +483,49 @@ func interactiveSetup(cfg *config.State, provider distro.Provider, baseDir, data
 		return fmt.Errorf("get asset paths: %w", err)
 	}
 
-	// Create disk image
-	images := vm.NewImageManager(dataDir)
-	if !images.DiskExists("disk") {
-		fmt.Println("Creating disk image...")
-		if _, err := images.EnsureDisk("disk", int64(cfg.DiskSizeMB)); err != nil {
-			return fmt.Errorf("create disk: %w", err)
-		}
-	}
+	// Check setup requirements - some distros (like Ubuntu) use qcow2 directly
+	reqs := provider.SetupRequirements()
 
-	// Setup filesystem (requires sudo)
-	rootfs := vm.NewRootfsManager(dataDir)
-	state, _ := rootfs.CheckSetupState("disk")
-
-	if !state.DiskFormatted {
-		fmt.Println("\nDisk formatting requires sudo permissions.")
-		if !promptYesNo("Give sudo permission to run file building?", true) {
-			return fmt.Errorf("sudo permission required for setup")
+	if reqs != nil && !reqs.NeedsExtraction {
+		// For qcow2-based distros (Ubuntu, Debian, etc.), the converted rootfs.raw
+		// IS the disk image - no need to create a separate disk or extract
+		fmt.Printf("Using %s cloud image as disk.\n", provider.Name())
+	} else {
+		// For tarball-based distros (Alpine, Arch), create and populate a disk
+		images := vm.NewImageManager(dataDir)
+		if !images.DiskExists("disk") {
+			fmt.Println("Creating disk image...")
+			if _, err := images.EnsureDisk("disk", int64(cfg.DiskSizeMB)); err != nil {
+				return fmt.Errorf("create disk: %w", err)
+			}
 		}
 
-		reqs := provider.SetupRequirements()
-		fsType := reqs.FSType
-		if fsType == "" {
-			fsType = "ext4"
+		// Setup filesystem (requires sudo)
+		rootfs := vm.NewRootfsManager(dataDir)
+		state, _ := rootfs.CheckSetupState("disk")
+
+		if !state.DiskFormatted {
+			fmt.Println("\nDisk formatting requires sudo permissions.")
+			if !promptYesNo("Give sudo permission to run file building?", true) {
+				return fmt.Errorf("sudo permission required for setup")
+			}
+
+			fsType := "ext4"
+			if reqs != nil && reqs.FSType != "" {
+				fsType = reqs.FSType
+			}
+
+			fmt.Printf("Formatting disk with %s filesystem...\n", fsType)
+			if err := rootfs.FormatDisk("disk", fsType); err != nil {
+				return fmt.Errorf("format disk: %w", err)
+			}
 		}
 
-		fmt.Printf("Formatting disk with %s filesystem...\n", fsType)
-		if err := rootfs.FormatDisk("disk", fsType); err != nil {
-			return fmt.Errorf("format disk: %w", err)
-		}
-	}
-
-	if !state.RootfsExtracted {
-		fmt.Println("Extracting rootfs to disk...")
-		if err := rootfs.ExtractRootfs("disk", assetPaths.Rootfs); err != nil {
-			return fmt.Errorf("extract rootfs: %w", err)
+		if !state.RootfsExtracted {
+			fmt.Println("Extracting rootfs to disk...")
+			if err := rootfs.ExtractRootfs("disk", assetPaths.Rootfs); err != nil {
+				return fmt.Errorf("extract rootfs: %w", err)
+			}
 		}
 	}
 

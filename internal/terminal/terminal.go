@@ -28,6 +28,11 @@ func Current() *Console {
 	}
 }
 
+// IsTTY returns true if stdin is a terminal.
+func IsTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
 // SetRaw puts the terminal into raw mode and returns restore function.
 func (c *Console) SetRaw() (func(), error) {
 	oldState, err := term.MakeRaw(c.fd)

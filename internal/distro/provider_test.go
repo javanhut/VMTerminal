@@ -383,9 +383,11 @@ func TestAllDistrosHaveConsistentConfig(t *testing.T) {
 					t.Errorf("ConsoleDevice = %q, want hvc0", bc.ConsoleDevice)
 				}
 
-				// All distros should use /dev/vda as root
-				if bc.RootDevice != "/dev/vda" {
-					t.Errorf("RootDevice = %q, want /dev/vda", bc.RootDevice)
+				// Root device can be /dev/vda or LABEL-based (for cloud images with partitions)
+				validRootDevice := bc.RootDevice == "/dev/vda" ||
+					strings.HasPrefix(bc.RootDevice, "LABEL=")
+				if !validRootDevice {
+					t.Errorf("RootDevice = %q, want /dev/vda or LABEL=*", bc.RootDevice)
 				}
 			})
 		}

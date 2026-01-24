@@ -49,8 +49,16 @@ func IsLoginShell() bool {
 // RunShellMode runs vmterminal as a login shell.
 // This is called from main.go when detected as login shell.
 func RunShellMode() {
+	// Enable quiet mode for login shell
+	SetQuietMode(true)
+
+	// Run the VM
 	if err := runRun(nil, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "vmterminal: %v\n", err)
+		// Only print errors that aren't expected conditions
+		errMsg := err.Error()
+		if errMsg != "no TTY detected; vmterminal requires a terminal" {
+			fmt.Fprintf(os.Stderr, "vmterminal: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -59,6 +67,7 @@ func init() {
 	// Add subcommands - minimal set per new design
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(reloadCmd)
 	rootCmd.AddCommand(defaultCmd)
 	rootCmd.AddCommand(switchCmd)

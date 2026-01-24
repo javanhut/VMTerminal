@@ -158,38 +158,27 @@ func (e *KernelExtractor) extractFromQcow2(archivePath string, locator *distro.K
 }
 
 // extractWithGuestfish extracts kernel/initrd using libguestfs.
+// Uses the -i flag for automatic inspection and mounting of filesystems.
 func (e *KernelExtractor) extractWithGuestfish(qcow2Path string, locator *distro.KernelLocator) (string, string, error) {
-	// First, inspect the disk to find the root filesystem
-	rootDev, err := e.guestfishFindRoot(qcow2Path)
-	if err != nil {
-		return "", "", fmt.Errorf("find root filesystem: %w", err)
-	}
-
-	// List files in /boot to find matching kernel/initrd
-	listScript := fmt.Sprintf(`add %s
-run
-mount %s /
-glob /boot/vmlinuz* /boot/initr* /boot/vmlinux*
-`, qcow2Path, rootDev)
-
-	cmd := exec.Command("guestfish")
-	cmd.Stdin = strings.NewReader(listScript)
+	// Use guestfish with -i flag for auto-inspection and mounting
+	// This is more reliable than manual mount commands which can fail silently
+	cmd := exec.Command("guestfish", "--ro", "-a", qcow2Path, "-i", "ls", "/boot")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", "", fmt.Errorf("guestfish list failed: %w: %s", err, stderr.String())
+		return "", "", fmt.Errorf("guestfish ls /boot failed: %w: %s", err, stderr.String())
 	}
 
-	// Parse output to find files
+	// Parse output to find files - ls /boot returns just filenames
 	files := strings.Split(stdout.String(), "\n")
 	var bootFiles []string
 	for _, f := range files {
 		f = strings.TrimSpace(f)
 		if f != "" {
-			// Strip leading / for pattern matching
-			bootFiles = append(bootFiles, strings.TrimPrefix(f, "/"))
+			// Add boot/ prefix since ls /boot returns just filenames
+			bootFiles = append(bootFiles, "boot/"+f)
 		}
 	}
 
@@ -206,115 +195,25 @@ glob /boot/vmlinuz* /boot/initr* /boot/vmlinux*
 
 	// Extract kernel
 	kernelDest := filepath.Join(e.cacheDir, "vmlinuz")
-	if err := e.guestfishCopyOut(qcow2Path, rootDev, "/"+kernelFile, kernelDest); err != nil {
+	if err := e.guestfishCopyOut(qcow2Path, "/"+kernelFile, kernelDest); err != nil {
 		return "", "", fmt.Errorf("extract kernel: %w", err)
 	}
 
 	// Extract initrd
 	initrdDest := filepath.Join(e.cacheDir, "initramfs")
-	if err := e.guestfishCopyOut(qcow2Path, rootDev, "/"+initrdFile, initrdDest); err != nil {
+	if err := e.guestfishCopyOut(qcow2Path, "/"+initrdFile, initrdDest); err != nil {
 		return "", "", fmt.Errorf("extract initrd: %w", err)
 	}
 
 	return kernelDest, initrdDest, nil
 }
 
-// guestfishFindRoot inspects the disk and finds the root filesystem device.
-func (e *KernelExtractor) guestfishFindRoot(qcow2Path string) (string, error) {
-	// Use inspect-os to find the root filesystem
-	script := fmt.Sprintf(`add %s
-run
-inspect-os
-`, qcow2Path)
-
-	cmd := exec.Command("guestfish")
-	cmd.Stdin = strings.NewReader(script)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// If inspect-os fails, try to list filesystems and pick the largest
-		return e.guestfishFindRootBySize(qcow2Path)
-	}
-
-	// Parse output - inspect-os returns the root device(s)
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && strings.HasPrefix(line, "/dev/") {
-			return line, nil
-		}
-	}
-
-	// Fallback to finding by size
-	return e.guestfishFindRootBySize(qcow2Path)
-}
-
-// guestfishFindRootBySize lists filesystems and picks the largest one (likely root).
-func (e *KernelExtractor) guestfishFindRootBySize(qcow2Path string) (string, error) {
-	script := fmt.Sprintf(`add %s
-run
-list-filesystems
-`, qcow2Path)
-
-	cmd := exec.Command("guestfish")
-	cmd.Stdin = strings.NewReader(script)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("list-filesystems failed: %w: %s", err, stderr.String())
-	}
-
-	// Parse output: format is "/dev/sda1: ext4" or similar
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-
-	// Preferred partition order for typical cloud images:
-	// 1. First try partitions that look like root (sda1, vda1, etc. but not EFI)
-	// 2. Prefer ext4/xfs over vfat
-	var candidates []string
-	for _, line := range lines {
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		dev := strings.TrimSpace(parts[0])
-		fsType := strings.TrimSpace(parts[1])
-
-		// Skip swap and unknown filesystems
-		if fsType == "swap" || fsType == "unknown" || fsType == "" {
-			continue
-		}
-
-		// Skip EFI/vfat partitions (usually small boot partitions)
-		if fsType == "vfat" {
-			continue
-		}
-
-		candidates = append(candidates, dev)
-	}
-
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no suitable filesystem found")
-	}
-
-	// Return the last candidate (usually the main root partition in cloud images)
-	// Cloud images typically have: sda1=boot/efi, sda2=root or sda15=efi, sda1=root
-	return candidates[len(candidates)-1], nil
-}
-
 // guestfishCopyOut copies a file out of a qcow2 image using guestfish.
-func (e *KernelExtractor) guestfishCopyOut(qcow2Path, rootDev, srcPath, destPath string) error {
-	script := fmt.Sprintf(`add %s
-run
-mount %s /
-copy-out %s %s
-`, qcow2Path, rootDev, srcPath, filepath.Dir(destPath))
-
-	cmd := exec.Command("guestfish")
-	cmd.Stdin = strings.NewReader(script)
+// Uses the -i flag for automatic inspection and mounting of filesystems.
+func (e *KernelExtractor) guestfishCopyOut(qcow2Path, srcPath, destPath string) error {
+	destDir := filepath.Dir(destPath)
+	cmd := exec.Command("guestfish", "--ro", "-a", qcow2Path, "-i",
+		"copy-out", srcPath, destDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -323,7 +222,7 @@ copy-out %s %s
 	}
 
 	// guestfish copy-out puts the file with its original name, rename to our dest
-	extractedPath := filepath.Join(filepath.Dir(destPath), filepath.Base(srcPath))
+	extractedPath := filepath.Join(destDir, filepath.Base(srcPath))
 	if extractedPath != destPath {
 		return os.Rename(extractedPath, destPath)
 	}
