@@ -15,6 +15,7 @@ import (
 	"github.com/javanstorm/vmterminal/internal/config"
 	"github.com/javanstorm/vmterminal/internal/distro"
 	"github.com/javanstorm/vmterminal/internal/terminal"
+	"github.com/javanstorm/vmterminal/internal/timing"
 	"github.com/javanstorm/vmterminal/internal/vm"
 	"github.com/javanstorm/vmterminal/pkg/hypervisor"
 	"github.com/spf13/cobra"
@@ -42,11 +43,20 @@ func init() {
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
+	// Initialize timing if VMT_TIMING=1
+	var timer *timing.Timer
+	if os.Getenv("VMT_TIMING") == "1" {
+		timer = timing.New()
+	}
+
 	// Load or create config
 	cfg, err := config.LoadState()
 	if err != nil {
 		// First run - create default config
 		cfg = config.DefaultState()
+	}
+	if timer != nil {
+		timer.Mark("config_load")
 	}
 
 	// Override distro from flag if specified
@@ -79,6 +89,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	provider, err := distro.Get(distroID)
 	if err != nil {
 		return fmt.Errorf("get distro: %w", err)
+	}
+	if timer != nil {
+		timer.Mark("distro_resolve")
 	}
 
 	// Setup data directory for VM
@@ -146,6 +159,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
+	if timer != nil {
+		timer.Mark("manager_create")
+	}
 
 	// Save config state
 	if err := config.SaveState(cfg); err != nil {
@@ -170,10 +186,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err := mgr.Prepare(ctx); err != nil {
 		return fmt.Errorf("prepare VM: %w", err)
 	}
+	if timer != nil {
+		timer.Mark("vm_prepare")
+	}
 
 	fmt.Println("Starting VM...")
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("start VM: %w", err)
+	}
+	if timer != nil {
+		timer.Mark("vm_start")
 	}
 
 	// Get console I/O handles
@@ -194,6 +216,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	go func() {
 		attachDone <- attachToConsole(ctx, vmIn, vmOut)
 	}()
+
+	// Print timing report if enabled (before blocking on console)
+	if timer != nil {
+		timer.Mark("console_attach")
+		timer.Report(os.Stderr)
+	}
 
 	// Wait for either signal or attach completion
 	select {
