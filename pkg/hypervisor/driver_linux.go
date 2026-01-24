@@ -135,16 +135,8 @@ func (d *kvmDriver) Create(ctx context.Context, cfg *VMConfig) error {
 		d.diskFile = diskFile
 	}
 
-	// Warn about unsupported shared directories on Linux
-	if len(cfg.SharedDirs) > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: shared directories not yet supported on Linux (hype lacks virtio-fs/9p)\n")
-	}
-
-	// Warn about unsupported networking on Linux
-	if cfg.EnableNetwork {
-		fmt.Fprintf(os.Stderr, "Warning: networking not yet supported on Linux (hype lacks virtio-net)\n")
-		fmt.Fprintf(os.Stderr, "  Consider using SSH forwarding through host if network access needed\n")
-	}
+	// Note: Warnings about unsupported SharedDirs and Networking are now
+	// handled earlier by config.ValidateConfig() in the run command.
 
 	// Create the VM (but don't run yet)
 	vm, err := vmm.New(hypeCfg)

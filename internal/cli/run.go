@@ -107,6 +107,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Early capability check - warn about unsupported features
+	driver, err := hypervisor.NewDriver()
+	if err != nil {
+		return fmt.Errorf("create driver: %w", err)
+	}
+	caps := driver.Capabilities()
+
+	warnings := config.ValidateConfig(cfg, caps)
+	if len(warnings) > 0 {
+		fmt.Fprint(os.Stderr, config.FormatValidationErrors(warnings))
+		// Continue anyway - warnings are informational
+	}
+
 	// Build shared dirs map from config
 	sharedDirs := make(map[string]string)
 	for i, dir := range cfg.SharedDirs {
