@@ -72,7 +72,8 @@ func (m *SnapshotManager) Load(vmName string) (*SnapshotData, error) {
 	return &snapshots, nil
 }
 
-// Save writes the snapshot metadata to disk.
+// Save writes the snapshot metadata to disk atomically.
+// Uses temp file + rename to prevent corruption on interrupted writes.
 func (m *SnapshotManager) Save(vmName string, data *SnapshotData) error {
 	// Ensure data directory exists
 	dataDir := filepath.Join(m.baseDir, "data", vmName)
@@ -85,8 +86,17 @@ func (m *SnapshotManager) Save(vmName string, data *SnapshotData) error {
 		return fmt.Errorf("marshal snapshots: %w", err)
 	}
 
-	if err := os.WriteFile(m.snapshotsFile(vmName), jsonData, 0644); err != nil {
-		return fmt.Errorf("write snapshots: %w", err)
+	// Write atomically: temp file + rename
+	finalPath := m.snapshotsFile(vmName)
+	tmpPath := finalPath + ".tmp"
+
+	if err := os.WriteFile(tmpPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("write snapshots temp: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath) // Clean up temp file on rename failure
+		return fmt.Errorf("rename snapshots: %w", err)
 	}
 
 	return nil
