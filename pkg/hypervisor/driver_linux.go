@@ -172,9 +172,9 @@ func (d *kvmDriver) Start(ctx context.Context) (chan error, error) {
 	}
 
 	errCh := make(chan error, 1)
+	startedCh := make(chan struct{})
 	runCtx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
-	d.state = stateRunning
 
 	// Run VM in background
 	go func() {
@@ -182,12 +182,19 @@ func (d *kvmDriver) Start(ctx context.Context) (chan error, error) {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
+		// Signal that goroutine has started before running VM
+		close(startedCh)
+
 		err := d.vm.Run(runCtx)
 		d.mu.Lock()
 		d.state = stateStopped
 		d.mu.Unlock()
 		errCh <- err
 	}()
+
+	// Wait for goroutine to actually start before setting state
+	<-startedCh
+	d.state = stateRunning
 
 	return errCh, nil
 }
