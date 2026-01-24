@@ -299,3 +299,11 @@ func (d *vzDriver) Console() (io.Writer, io.Reader, error) {
 
 	return d.consoleIn, d.consoleOut, nil
 }
+
+func (d *vzDriver) Capabilities() Capabilities {
+	return Capabilities{
+		SharedDirs: true,  // virtio-fs supported
+		Networking: true,  // virtio-net supported
+		Snapshots:  false, // Not yet implemented
+	}
+}

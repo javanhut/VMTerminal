@@ -239,3 +239,11 @@ func (d *kvmDriver) Console() (io.Writer, io.Reader, error) {
 
 	return d.consoleIn, d.consoleOut, nil
 }
+
+func (d *kvmDriver) Capabilities() Capabilities {
+	return Capabilities{
+		SharedDirs: false, // hype lacks virtio-fs/9p
+		Networking: false, // hype lacks virtio-net
+		Snapshots:  false, // Not implemented
+	}
+}

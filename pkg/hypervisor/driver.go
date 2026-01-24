@@ -14,6 +14,16 @@ type Driver interface {
 	Info() Info
 	// Console returns VM console I/O handles. Only valid after Start().
 	Console() (in io.Writer, out io.Reader, err error)
+	// Capabilities returns what features the driver supports.
+	Capabilities() Capabilities
+}
+
+// Capabilities describes driver feature support.
+// Used for early validation before VM configuration.
+type Capabilities struct {
+	SharedDirs bool // virtio-fs or similar
+	Networking bool // virtio-net or similar
+	Snapshots  bool // VM state snapshots
 }
 
 // Lifecycle defines VM lifecycle operations.
