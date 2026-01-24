@@ -6,6 +6,7 @@ require (
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/c35s/hype v0.0.0-20240219193225-9c233c6170bc
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/crypto v0.31.0
 	golang.org/x/term v0.39.0
 )
 
