@@ -17,3 +17,5 @@ require (
 	golang.org/x/mod v0.26.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 )
+
+replace github.com/c35s/hype => ./third_party/hype
