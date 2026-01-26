@@ -113,10 +113,11 @@ func (m *RootfsManager) ExtractRootfs(diskName, rootfsPath string) error {
 	defer os.RemoveAll(mountPoint)
 
 	// Mount the disk
-	if err := m.mountDisk(diskPath, mountPoint); err != nil {
+	loopDev, err := m.mountDisk(diskPath, mountPoint)
+	if err != nil {
 		return fmt.Errorf("mount disk: %w", err)
 	}
-	defer m.unmountDisk(mountPoint)
+	defer m.unmountDisk(mountPoint, loopDev)
 
 	// Determine extraction command based on archive type
 	// sudo is required since the mount point is owned by root
@@ -149,17 +150,49 @@ func (m *RootfsManager) ExtractRootfs(diskName, rootfsPath string) error {
 }
 
 // mountDisk mounts a disk image to a mount point.
-func (m *RootfsManager) mountDisk(diskPath, mountPoint string) error {
+func (m *RootfsManager) mountDisk(diskPath, mountPoint string) (string, error) {
+	// Prefer explicit loop device setup to avoid "failed to setup loop device" errors.
+	if _, err := exec.LookPath("losetup"); err == nil {
+		// Best-effort: ensure loop module is available.
+		_ = exec.Command("sudo", "modprobe", "loop").Run()
+
+		loopCmd := exec.Command("sudo", "losetup", "--find", "--show", "--partscan", diskPath)
+		out, err := loopCmd.Output()
+		if err == nil {
+			loopDev := strings.TrimSpace(string(out))
+			if loopDev != "" {
+				mountCmd := exec.Command("sudo", "mount", loopDev, mountPoint)
+				mountCmd.Stdout = os.Stdout
+				mountCmd.Stderr = os.Stderr
+				if err := mountCmd.Run(); err != nil {
+					_ = exec.Command("sudo", "losetup", "-d", loopDev).Run()
+					return "", err
+				}
+				return loopDev, nil
+			}
+		}
+		// If losetup fails, fall back to mount -o loop.
+	}
+
 	cmd := exec.Command("sudo", "mount", "-o", "loop", diskPath, mountPoint)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 // unmountDisk unmounts a disk from a mount point.
-func (m *RootfsManager) unmountDisk(mountPoint string) error {
+func (m *RootfsManager) unmountDisk(mountPoint, loopDev string) error {
 	cmd := exec.Command("sudo", "umount", mountPoint)
-	return cmd.Run()
+	umountErr := cmd.Run()
+
+	if loopDev != "" {
+		_ = exec.Command("sudo", "losetup", "-d", loopDev).Run()
+	}
+
+	return umountErr
 }
 
 // extractQcow2 extracts contents from a qcow2 image.
