@@ -272,7 +272,8 @@ func (h *blockHandler) handle(q *virtq.Queue) error {
 		optypeRaw := binary.LittleEndian.Uint32(hdr)
 		optype := optypeRaw & blkTypeMask
 		flags := optypeRaw &^ blkTypeMask
-		offsec := binary.LittleEndian.Uint32(hdr[8:])
+		// Sector is a 64-bit field at offset 8 in the virtio_blk_req header
+		offsec := binary.LittleEndian.Uint64(hdr[8:])
 
 		var n int
 		switch optype {
