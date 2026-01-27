@@ -40,6 +40,15 @@ type Desc struct {
 	Flags uint16
 }
 
+// indirectDesc is the layout for indirect descriptors (different from ring descriptors).
+// Per virtio spec: addr(8), len(4), flags(2), next(2)
+type indirectDesc struct {
+	Addr  uint64
+	Len   uint32
+	Flags uint16
+	Next  uint16
+}
+
 // EventSuppress is the driver or device event suppression area for a packed virtqueue.
 type EventSuppress struct {
 	Desc  uint16
@@ -117,7 +126,22 @@ func (q *Queue) Next() (avail *Chain, err error) {
 			return nil, errors.New("malformed indirect buffer")
 		}
 
-		c.Desc = unsafe.Slice((*Desc)(unsafe.Pointer(&data[0])), len(data)/16)
+		// Indirect descriptors have a different layout than ring descriptors:
+		// Ring: Addr(8), Len(4), ID(2), Flags(2)
+		// Indirect: Addr(8), Len(4), Flags(2), Next(2)
+		// We need to convert them to the Desc format for the handler.
+		numDesc := len(data) / 16
+		indirects := unsafe.Slice((*indirectDesc)(unsafe.Pointer(&data[0])), numDesc)
+		descs := make([]Desc, numDesc)
+		for j := 0; j < numDesc; j++ {
+			descs[j] = Desc{
+				Addr:  indirects[j].Addr,
+				Len:   indirects[j].Len,
+				ID:    indirects[j].Next,  // Store Next in ID (not used for indirect)
+				Flags: indirects[j].Flags, // Correctly place Flags
+			}
+		}
+		c.Desc = descs
 	}
 
 	return c, nil
