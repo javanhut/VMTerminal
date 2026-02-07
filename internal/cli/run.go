@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,11 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/javanstorm/vmterminal/internal/config"
 	"github.com/javanstorm/vmterminal/internal/distro"
-	"github.com/javanstorm/vmterminal/internal/terminal"
+	"github.com/javanstorm/vmterminal/internal/gui"
 	"github.com/javanstorm/vmterminal/internal/timing"
 	"github.com/javanstorm/vmterminal/internal/vm"
 	"github.com/javanstorm/vmterminal/pkg/hypervisor"
@@ -29,7 +29,7 @@ import (
 //   - manager_create:  <100ms  (driver init, apply defaults)
 //   - vm_prepare:      <200ms  (parallel asset checks, skip downloads)
 //   - vm_start:        <2000ms (hypervisor-dependent, kernel boot)
-//   - console_attach:  <50ms   (terminal raw mode setup)
+//   - gui_launch:      <100ms  (open GUI terminal window)
 //   - TOTAL:           <3000ms
 //
 // Cold path (first run) adds: asset downloads, disk creation, rootfs extraction.
@@ -101,8 +101,7 @@ interactively guide you through the setup process:
 2. Check for optional dependencies (FuseFS)
 3. Download the Linux distribution if needed
 4. Set up filesystem (may require sudo)
-5. Optionally set VM as default terminal
-6. Start VM and attach to console`,
+5. Start VM and open GUI terminal window`,
 	RunE: runRun,
 }
 
@@ -113,11 +112,6 @@ func init() {
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
-	// Check if we have a TTY
-	if !terminal.IsTTY() {
-		return fmt.Errorf("no TTY detected; vmterminal requires a terminal")
-	}
-
 	// Initialize timing if VMT_TIMING=1
 	var timer *timing.Timer
 	if os.Getenv("VMT_TIMING") == "1" {
@@ -159,14 +153,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Check if VM is already running
 	running, pid := isVMRunning(baseDir, "default")
 	if running {
-		if quietMode {
-			// In login shell mode, just inform and exit
-			fmt.Fprintf(os.Stderr, "VM already running (PID %d). Use another terminal or 'vmterminal stop' first.\n", pid)
-			return nil
-		}
 		fmt.Printf("VM is already running (PID %d).\n", pid)
 		fmt.Println("You can:")
-		fmt.Println("  - Open another terminal to get a new session")
 		fmt.Println("  - Run 'vmterminal stop' to stop the VM")
 		fmt.Println("  - Run 'vmterminal status' to see VM state")
 		return nil
@@ -208,7 +196,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// If not set up, run interactive setup
 	if !state.RootfsExtracted {
 		fmt.Println()
-		if err := interactiveSetup(cfg, provider, baseDir, dataDir, cacheDir); err != nil {
+		if err := interactiveSetup(cfg, provider, dataDir, cacheDir); err != nil {
 			return err
 		}
 	}
@@ -317,69 +305,52 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get console: %w", err)
 	}
 
-	printlnIfNotQuiet("Attaching to console...")
-	printlnIfNotQuiet()
-
-	// Setup signal handler for graceful shutdown (including SIGHUP for terminal close)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
-	// Attach in background, stop on signal
-	attachDone := make(chan error, 1)
-	go func() {
-		attachDone <- attachToConsole(ctx, vmIn, vmOut)
-	}()
-
-	// Print timing report if enabled (before blocking on console)
+	// Print timing report if enabled (before blocking on GUI)
 	if timer != nil {
-		timer.Mark("console_attach")
+		timer.Mark("gui_launch")
 		timer.Report(os.Stderr)
 	}
 
-	// Wait for either signal or attach completion
-	select {
-	case sig := <-sigCh:
-		if sig == syscall.SIGHUP {
-			// Terminal closed - graceful shutdown without printing (terminal gone)
-		} else {
-			printlnIfNotQuiet("\nStopping VM...")
-		}
-		cancel()
-		// Close console pipes to unblock I/O goroutines
-		mgr.CloseConsole()
-		if err := mgr.Stop(ctx); err != nil {
-			// Only log if not SIGHUP (terminal might be gone)
-			if sig != syscall.SIGHUP {
-				fmt.Fprintf(os.Stderr, "Stop error: %v\n", err)
-			}
-		}
-		cleanShutdown = true
-	case err := <-attachDone:
-		if errors.Is(err, terminal.ErrEscapeSequence) {
-			// User triggered escape sequence - clean exit
-			printlnIfNotQuiet("Stopping VM...")
+	// Setup signal handler for graceful shutdown from outside
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// shutdownOnce ensures we only run the shutdown sequence once,
+	// whether triggered by signal or GUI window close.
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
 			cancel()
-			// Close console pipes to unblock I/O goroutines
 			mgr.CloseConsole()
 			if stopErr := mgr.Stop(ctx); stopErr != nil {
 				fmt.Fprintf(os.Stderr, "Stop error: %v\n", stopErr)
 			}
 			cleanShutdown = true
-		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "Attach error: %v\n", err)
-			// Close console pipes on error too
-			mgr.CloseConsole()
-		} else {
-			cleanShutdown = true // Normal console detach is clean
-		}
+		})
 	}
+
+	// Handle external signals in background
+	go func() {
+		<-sigCh
+		shutdown()
+	}()
+
+	// Build window title
+	windowTitle := fmt.Sprintf("VMTerminal - %s %s", provider.Name(), provider.Version())
+
+	printlnIfNotQuiet("Opening GUI terminal...")
+
+	// Launch GUI terminal window (blocks until window is closed)
+	gui.RunTerminal(vmIn, vmOut, windowTitle, shutdown)
+
+	// Ensure shutdown runs even if window closed without triggering onClose
+	shutdown()
 
 	// Wait for VM to exit
 	if err := mgr.Wait(); err != nil {
 		return fmt.Errorf("VM exited with error: %w", err)
 	}
 
-	printlnIfNotQuiet("VM stopped")
 	return nil
 }
 
@@ -474,7 +445,7 @@ func resolveDistro(cfg *config.State) (distro.ID, error) {
 }
 
 // interactiveSetup guides the user through initial VM setup.
-func interactiveSetup(cfg *config.State, provider distro.Provider, baseDir, dataDir, cacheDir string) error {
+func interactiveSetup(cfg *config.State, provider distro.Provider, dataDir, cacheDir string) error {
 	fmt.Println("Creating File Structure...")
 
 	// Check for FuseFS (optional)
@@ -547,18 +518,6 @@ func interactiveSetup(cfg *config.State, provider distro.Provider, baseDir, data
 
 	fmt.Printf("Installed %s.\n", provider.Name())
 
-	// Prompt to set as default terminal
-	if promptYesNo("Set as default for Terminal?", true) {
-		fmt.Println("Setting this in system shell...")
-		if err := setAsDefaultShell(baseDir); err != nil {
-			fmt.Printf("Warning: could not set as default: %v\n", err)
-			fmt.Println("You can manually add vmterminal to your shell's profile.")
-		} else {
-			fmt.Println("Finished!")
-			fmt.Println("Restart Terminal or run 'vmterminal reload'.")
-		}
-	}
-
 	fmt.Printf("\nWelcome to %s.\n", provider.Name())
 	return nil
 }
@@ -602,79 +561,6 @@ func promptYesNo(question string, defaultYes bool) bool {
 		return defaultYes
 	}
 	return input == "y" || input == "yes"
-}
-
-// setAsDefaultShell configures vmterminal as the default terminal shell.
-func setAsDefaultShell(baseDir string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	// Determine which shell config file to modify
-	shell := os.Getenv("SHELL")
-	var configFile string
-	var configLine string
-
-	binPath := "/usr/local/bin/vmterminal"
-	// Check if binary exists, otherwise use current executable
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		if exePath, err := os.Executable(); err == nil {
-			binPath = exePath
-		}
-	}
-
-	configLine = fmt.Sprintf("\n# VMTerminal - Launch Linux VM on terminal start\nif [ -z \"$VMTERMINAL_SKIP\" ] && [ -x %s ]; then\n  exec %s\nfi\n", binPath, binPath)
-
-	switch {
-	case strings.Contains(shell, "zsh"):
-		configFile = filepath.Join(homeDir, ".zshrc")
-	case strings.Contains(shell, "bash"):
-		configFile = filepath.Join(homeDir, ".bashrc")
-	default:
-		configFile = filepath.Join(homeDir, ".profile")
-	}
-
-	// Read existing config
-	content, _ := os.ReadFile(configFile)
-
-	// Check if already configured
-	if strings.Contains(string(content), "VMTERMINAL_SKIP") {
-		return nil // Already configured
-	}
-
-	// Append configuration
-	f, err := os.OpenFile(configFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	if _, err := f.WriteString(configLine); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// attachToConsole attaches the current terminal to VM console I/O.
-// Returns terminal.ErrEscapeSequence if user triggers escape sequence (Ctrl+] twice).
-func attachToConsole(ctx context.Context, vmIn interface{}, vmOut interface{}) error {
-	// Type assert the interfaces to io.Writer and io.Reader
-	writer, ok := vmIn.(interface{ Write([]byte) (int, error) })
-	if !ok {
-		return fmt.Errorf("vmIn does not implement Write")
-	}
-	reader, ok := vmOut.(interface{ Read([]byte) (int, error) })
-	if !ok {
-		return fmt.Errorf("vmOut does not implement Read")
-	}
-
-	console := terminal.Current()
-
-	// Use the terminal package's Attach for bidirectional I/O
-	// Signal handling is done by the caller (runRun)
-	return console.Attach(ctx, writer, reader)
 }
 
 // getHypervisorInfo returns information about the available hypervisor.

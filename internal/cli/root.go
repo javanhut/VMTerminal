@@ -3,15 +3,14 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "vmterminal",
-	Short: "VMTerminal - Linux VM as your terminal",
-	Long: `VMTerminal runs a Linux VM as your default terminal on macOS and Linux.
+	Short: "VMTerminal - Linux VM with built-in GUI terminal",
+	Long: `VMTerminal runs a Linux VM with a built-in GUI terminal emulator.
 
 One intelligent command that handles everything interactively.
 No separate setup steps, no static config files.
@@ -33,43 +32,12 @@ func Execute() error {
 	return nil
 }
 
-// IsLoginShell returns true if invoked as a login shell.
-// Login shells are invoked with argv[0] prefixed with '-' by convention.
-func IsLoginShell() bool {
-	if len(os.Args) == 0 {
-		return false
-	}
-	arg0 := os.Args[0]
-	if len(arg0) == 0 {
-		return false
-	}
-	return arg0[0] == '-'
-}
-
-// RunShellMode runs vmterminal as a login shell.
-// This is called from main.go when detected as login shell.
-func RunShellMode() {
-	// Enable quiet mode for login shell
-	SetQuietMode(true)
-
-	// Run the VM
-	if err := runRun(nil, nil); err != nil {
-		// Only print errors that aren't expected conditions
-		errMsg := err.Error()
-		if errMsg != "no TTY detected; vmterminal requires a terminal" {
-			fmt.Fprintf(os.Stderr, "vmterminal: %v\n", err)
-		}
-		os.Exit(1)
-	}
-}
-
 func init() {
-	// Add subcommands - minimal set per new design
+	// Add subcommands
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(reloadCmd)
-	rootCmd.AddCommand(defaultCmd)
 	rootCmd.AddCommand(switchCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(configCmd)
