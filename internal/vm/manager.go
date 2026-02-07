@@ -438,6 +438,12 @@ func (m *Manager) Console() (io.Writer, io.Reader, error) {
 	return m.driver.Console()
 }
 
+// CloseConsole closes console pipes to unblock I/O operations.
+// Safe to call multiple times. Used when forcefully detaching from console.
+func (m *Manager) CloseConsole() error {
+	return m.driver.CloseConsole()
+}
+
 // Provider returns the distro provider.
 func (m *Manager) Provider() distro.Provider {
 	return m.cfg.Provider

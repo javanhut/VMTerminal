@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -316,7 +317,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get console: %w", err)
 	}
 
-	printlnIfNotQuiet("Attaching to console (Ctrl+C to stop VM)...")
+	printlnIfNotQuiet("Attaching to console...")
 	printlnIfNotQuiet()
 
 	// Setup signal handler for graceful shutdown (including SIGHUP for terminal close)
@@ -344,6 +345,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			printlnIfNotQuiet("\nStopping VM...")
 		}
 		cancel()
+		// Close console pipes to unblock I/O goroutines
+		mgr.CloseConsole()
 		if err := mgr.Stop(ctx); err != nil {
 			// Only log if not SIGHUP (terminal might be gone)
 			if sig != syscall.SIGHUP {
@@ -352,10 +355,23 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		cleanShutdown = true
 	case err := <-attachDone:
-		if err != nil {
+		if errors.Is(err, terminal.ErrEscapeSequence) {
+			// User triggered escape sequence - clean exit
+			printlnIfNotQuiet("Stopping VM...")
+			cancel()
+			// Close console pipes to unblock I/O goroutines
+			mgr.CloseConsole()
+			if stopErr := mgr.Stop(ctx); stopErr != nil {
+				fmt.Fprintf(os.Stderr, "Stop error: %v\n", stopErr)
+			}
+			cleanShutdown = true
+		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "Attach error: %v\n", err)
+			// Close console pipes on error too
+			mgr.CloseConsole()
+		} else {
+			cleanShutdown = true // Normal console detach is clean
 		}
-		cleanShutdown = true // Normal console detach is clean
 	}
 
 	// Wait for VM to exit
@@ -642,6 +658,7 @@ func setAsDefaultShell(baseDir string) error {
 }
 
 // attachToConsole attaches the current terminal to VM console I/O.
+// Returns terminal.ErrEscapeSequence if user triggers escape sequence (Ctrl+] twice).
 func attachToConsole(ctx context.Context, vmIn interface{}, vmOut interface{}) error {
 	// Type assert the interfaces to io.Writer and io.Reader
 	writer, ok := vmIn.(interface{ Write([]byte) (int, error) })
@@ -655,25 +672,9 @@ func attachToConsole(ctx context.Context, vmIn interface{}, vmOut interface{}) e
 
 	console := terminal.Current()
 
-	// Create a context that we can cancel on escape sequence
-	attachCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Setup signal handler for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	go func() {
-		select {
-		case <-sigCh:
-			cancel()
-		case <-attachCtx.Done():
-		}
-	}()
-
 	// Use the terminal package's Attach for bidirectional I/O
-	return console.Attach(attachCtx, writer, reader)
+	// Signal handling is done by the caller (runRun)
+	return console.Attach(ctx, writer, reader)
 }
 
 // getHypervisorInfo returns information about the available hypervisor.

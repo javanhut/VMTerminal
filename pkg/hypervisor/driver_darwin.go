@@ -23,6 +23,9 @@ type vzDriver struct {
 	state      driverState
 	consoleIn  io.Writer // Write to this to send to VM
 	consoleOut io.Reader // Read from this to get VM output
+	// Raw pipe handles for closing
+	inputWriter  *os.File
+	outputReader *os.File
 }
 
 type driverState int
@@ -108,6 +111,8 @@ func (d *vzDriver) Create(ctx context.Context, cfg *VMConfig) error {
 	// Store console handles for Console() method
 	d.consoleIn = inputWriter
 	d.consoleOut = outputReader
+	d.inputWriter = inputWriter
+	d.outputReader = outputReader
 
 	// Create serial console for I/O with file handles
 	serialCfg, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(
@@ -298,6 +303,34 @@ func (d *vzDriver) Console() (io.Writer, io.Reader, error) {
 	}
 
 	return d.consoleIn, d.consoleOut, nil
+}
+
+func (d *vzDriver) CloseConsole() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var errs []error
+
+	if d.inputWriter != nil {
+		if err := d.inputWriter.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close input pipe: %w", err))
+		}
+		d.inputWriter = nil
+		d.consoleIn = nil
+	}
+
+	if d.outputReader != nil {
+		if err := d.outputReader.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close output pipe: %w", err))
+		}
+		d.outputReader = nil
+		d.consoleOut = nil
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("vzDriver: close console: %v", errs)
+	}
+	return nil
 }
 
 func (d *vzDriver) Capabilities() Capabilities {

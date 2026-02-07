@@ -14,6 +14,9 @@ type Driver interface {
 	Info() Info
 	// Console returns VM console I/O handles. Only valid after Start().
 	Console() (in io.Writer, out io.Reader, err error)
+	// CloseConsole closes console pipes to unblock any I/O operations.
+	// Safe to call multiple times. Used when forcefully detaching from console.
+	CloseConsole() error
 	// Capabilities returns what features the driver supports.
 	Capabilities() Capabilities
 }
