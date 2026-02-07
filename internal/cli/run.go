@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -311,36 +310,27 @@ func runRun(cmd *cobra.Command, args []string) error {
 		timer.Report(os.Stderr)
 	}
 
-	// Setup signal handler for graceful shutdown from outside
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	// shutdownOnce ensures we only run the shutdown sequence once,
-	// whether triggered by signal or GUI window close.
+	// whether triggered by signal, GUI window close, or VM connection end.
 	var shutdownOnce sync.Once
 	shutdown := func() {
 		shutdownOnce.Do(func() {
 			cancel()
 			mgr.CloseConsole()
-			if stopErr := mgr.Stop(ctx); stopErr != nil {
+			if stopErr := mgr.Stop(context.Background()); stopErr != nil {
 				fmt.Fprintf(os.Stderr, "Stop error: %v\n", stopErr)
 			}
 			cleanShutdown = true
 		})
 	}
 
-	// Handle external signals in background
-	go func() {
-		<-sigCh
-		shutdown()
-	}()
-
 	// Build window title
 	windowTitle := fmt.Sprintf("VMTerminal - %s %s", provider.Name(), provider.Version())
 
 	printlnIfNotQuiet("Opening GUI terminal...")
 
-	// Launch GUI terminal window (blocks until window is closed)
+	// Launch GUI terminal window (blocks until window is closed).
+	// Signal handling (Ctrl+C) is done inside RunTerminal.
 	gui.RunTerminal(vmIn, vmOut, windowTitle, shutdown)
 
 	// Ensure shutdown runs even if window closed without triggering onClose
